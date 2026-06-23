@@ -9,10 +9,18 @@ from __future__ import annotations
 import json
 import subprocess
 import unicodedata
+from pathlib import Path
 from typing import Optional
 
+import os
+
 TRELLIS_BIN = "trellis"
-PROJECT_ROOT = "/home/articulatus/git_repos/autonomous_library_agent"
+# Trellis workspace root — the directory containing .trellis/
+# Override with TRELLIS_WORKSPACE env var when the workspace is not the repo root.
+PROJECT_ROOT = os.environ.get(
+    "TRELLIS_WORKSPACE",
+    str(Path(__file__).resolve().parents[2])  # LAD_library/ when cloned inside it
+)
 PROJECT_SLUG = "microbiome-research-library"
 ACTOR = "daedalus"
 
