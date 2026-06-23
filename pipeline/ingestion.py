@@ -16,16 +16,36 @@ LLM-independent. No description field written. No stub nodes created.
 from __future__ import annotations
 
 import dataclasses
+import concurrent.futures
 import json
 import os
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Optional
+import xml.etree.ElementTree as ET
 
 import requests
 
 from pipeline.citations import CitationResult, fetch_outbound_citations
 from pipeline import trellis
+
+
+@dataclass
+class PhaseMetrics:
+    name: str
+    wall_seconds: float
+    per_item_seconds: float
+    items: int
+
+
+@dataclass
+class BatchMetrics:
+    phases: list[PhaseMetrics]
+    total_seconds: float
+    workers: int
+    node_count_at_index: int
 
 
 @dataclass
@@ -218,23 +238,15 @@ def _pubmed_search(parsed: ParseResult) -> Optional[str]:
     return ids[0] if ids else None
 
 
-def _pubmed_summary(pmid: str) -> dict:
-    params = {"db": "pubmed", "id": pmid, "retmode": "json"}
-    api_key = os.getenv("NCBI_API_KEY")
-    if api_key:
-        params["api_key"] = api_key
-    response = requests.get(
-        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi",
-        params=params,
-        timeout=30,
-    )
-    response.raise_for_status()
-    payload = response.json().get("result", {})
-    return payload.get(pmid, {})
+def _element_text(element: Optional[ET.Element]) -> Optional[str]:
+    if element is None:
+        return None
+    text = " ".join("".join(element.itertext()).split())
+    return text or None
 
 
-def _pubmed_abstract(pmid: str) -> Optional[str]:
-    params = {"db": "pubmed", "id": pmid, "rettype": "abstract", "retmode": "text"}
+def _pubmed_fetch(pmid: str) -> dict:
+    params = {"db": "pubmed", "id": pmid, "rettype": "abstract", "retmode": "xml"}
     api_key = os.getenv("NCBI_API_KEY")
     if api_key:
         params["api_key"] = api_key
@@ -244,8 +256,50 @@ def _pubmed_abstract(pmid: str) -> Optional[str]:
         timeout=30,
     )
     response.raise_for_status()
-    text = response.text.strip()
-    return text or None
+    root = ET.fromstring(response.text)
+
+    abstract_parts = [
+        text for text in (_element_text(element) for element in root.findall(".//AbstractText")) if text
+    ]
+    authors = []
+    for author in root.findall(".//Author"):
+        last_name = _element_text(author.find("LastName"))
+        fore_name = _element_text(author.find("ForeName")) or _element_text(author.find("Initials"))
+        if last_name and fore_name:
+            authors.append(f"{last_name} {fore_name}")
+        elif last_name:
+            authors.append(last_name)
+
+    year = _element_text(root.find(".//PubDate/Year"))
+    if not year:
+        medline_date = _element_text(root.find(".//PubDate/MedlineDate"))
+        year = medline_date[:4] if medline_date else None
+    if not (year and year.isdigit() and len(year) == 4):
+        year = None
+
+    doi = None
+    for article_id in root.findall(".//ArticleId"):
+        if (article_id.get("IdType") or "").lower() == "doi":
+            doi = _bare_doi(_element_text(article_id))
+            break
+
+    fetched_pmid = None
+    for pmid_element in root.findall(".//PMID"):
+        if pmid_element.get("Version") == "1":
+            fetched_pmid = _element_text(pmid_element)
+            break
+    if not fetched_pmid:
+        fetched_pmid = _element_text(root.find(".//PMID"))
+
+    return {
+        "title": _element_text(root.find(".//ArticleTitle")),
+        "abstract": " ".join(abstract_parts) or None,
+        "authors": authors,
+        "year": year,
+        "venue": _element_text(root.find(".//Journal/Title")) or _element_text(root.find(".//ISOAbbreviation")),
+        "doi": doi,
+        "pmid": fetched_pmid or pmid,
+    }
 
 
 def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
@@ -253,34 +307,23 @@ def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
         pmid = parsed.pmid or _pubmed_search(parsed)
         if not pmid:
             return fields["source"]
-        summary = _pubmed_summary(pmid)
-        article_ids = summary.get("articleids") or []
-        doi = None
-        for article_id in article_ids:
-            if article_id.get("idtype") == "doi":
-                doi = _bare_doi(article_id.get("value"))
-                break
-        authors = [a.get("name") for a in summary.get("authors") or [] if a.get("name")]
-        pub_year = (summary.get("pubdate") or "").split(" ")[0] or None
-        if not (pub_year and pub_year.isdigit() and len(pub_year) == 4):
-            pub_year = None
+        fetched = _pubmed_fetch(pmid)
         fields.update(
             _merge_missing(
                 fields,
                 {
-                    "title": summary.get("title"),
-                    "doi": doi,
-                    "pmid": pmid,
-                    "authors": authors,
-                    "year": pub_year,
-                    "venue": summary.get("fulljournalname") or summary.get("source"),
+                    "title": fetched.get("title"),
+                    "doi": fetched.get("doi"),
+                    "pmid": fetched.get("pmid") or pmid,
+                    "abstract": fetched.get("abstract"),
+                    "authors": fetched.get("authors") or [],
+                    "year": fetched.get("year"),
+                    "venue": fetched.get("venue"),
                 },
             )
         )
-        if not fields.get("abstract"):
-            fields["abstract"] = _pubmed_abstract(pmid)
         return "pubmed"
-    except requests.RequestException:
+    except (requests.RequestException, ET.ParseError):
         return fields["source"]
 
 
@@ -411,24 +454,26 @@ def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
         trellis.annotate_node(slug, f"[{today}] Created via ingestion pipeline; source: {resolved.source}")
         return UpsertResult(slug=slug, created=True)
 
-    slug = _node_slug(dedup.existing_node)
-    if not slug:
-        raise RuntimeError("Existing Trellis node has no slug")
-    node = trellis.get_node(slug)
+    slug_or_id = dedup.existing_node.get("id") or dedup.existing_node.get("uuid") or dedup.existing_node.get("slug")
+    if not slug_or_id:
+        raise RuntimeError("Existing Trellis node has no slug or UUID")
+    node = dedup.existing_node
+    if "tags" not in node:
+        node = trellis.get_node(slug_or_id)
     current_meta = dict(node.get("metadata") or {})
     current_ref = dict(current_meta.get("reference") or {})
     current_meta["reference"] = _merge_missing(current_ref, metadata["reference"])
     trellis.update_node(
-        slug,
+        slug_or_id,
         metadata=current_meta,
         tags=_make_tags(resolved, node.get("tags") or []),
         citation=citation,
     )
     trellis.annotate_node(
-        slug,
+        slug_or_id,
         f"[{today}] Dedup match on {dedup.match_reason}; merged metadata; source: {resolved.source}",
     )
-    return UpsertResult(slug=slug, created=False)
+    return UpsertResult(slug=slug_or_id, created=False)
 
 
 def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult:
@@ -445,15 +490,30 @@ def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult
     return CitationStoreResult(stored=len(citations.items))
 
 
-def link_citations(slug: str, citations: CitationResult) -> LinkResult:
+def link_citations(slug: str, citations: CitationResult, index: dict = None) -> LinkResult:
     linked = 0
     skipped = 0
     for item in citations.items:
-        target = trellis.dedup_check(s2id=item.s2_id, doi=item.doi, pmid=item.pmid, title=item.title)
+        if index is not None:
+            target = trellis.dedup_check_indexed(
+                index,
+                s2id=item.s2_id,
+                doi=item.doi,
+                pmid=item.pmid,
+                title=item.title,
+            )
+        else:
+            target = trellis.dedup_check(
+                s2id=item.s2_id,
+                doi=item.doi,
+                pmid=item.pmid,
+                title=item.title,
+            )
         if not target:
             skipped += 1
             continue
-        target_slug = _node_slug(target)
+        # Prefer UUID to avoid ambiguous-slug errors in trellis link
+        target_slug = target.get("id") or _node_slug(target)
         if not target_slug:
             skipped += 1
             continue
@@ -503,11 +563,162 @@ def ingest_reference_pipeline(raw: dict) -> IngestionOutcome:
         outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
         citations = fetch_outbound_citations(outcome.resolve.doi or "")
         outcome.citation_store = store_citations(outcome.upsert.slug, citations)
-        outcome.link = link_citations(outcome.upsert.slug, citations)
+        index = trellis.build_node_index()
+        outcome.link = link_citations(outcome.upsert.slug, citations, index=index)
         outcome.verify = verify_outcome(outcome.upsert.slug)
     except (ValueError, RuntimeError) as e:
         outcome.errors.append(str(e))
     return outcome
+
+
+def format_metrics_table(metrics: BatchMetrics) -> str:
+    lines = [
+        "Batch metrics",
+        f"  total: {metrics.total_seconds:.2f}s | workers: {metrics.workers} | nodes at index: {metrics.node_count_at_index}",
+        "",
+        f"  {'phase':<36} {'items':>7} {'wall':>10} {'per item':>10}",
+        f"  {'-' * 36} {'-' * 7} {'-' * 10} {'-' * 10}",
+    ]
+    for phase in metrics.phases:
+        lines.append(
+            f"  {phase.name:<36} {phase.items:>7} {phase.wall_seconds:>9.2f}s {phase.per_item_seconds:>9.2f}s"
+        )
+    return "\n".join(lines)
+
+
+def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutcome], BatchMetrics]:
+    batch_t0 = time.perf_counter()
+    phases: list[PhaseMetrics] = []
+
+    def add_phase(name: str, wall_seconds: float, items: int) -> None:
+        per_item_seconds = wall_seconds / items if items else 0.0
+        phases.append(
+            PhaseMetrics(
+                name=name,
+                wall_seconds=wall_seconds,
+                per_item_seconds=per_item_seconds,
+                items=items,
+            )
+        )
+
+    t0 = time.perf_counter()
+    index = trellis.build_node_index()
+    elapsed = time.perf_counter() - t0
+    node_count_at_index = len(index)
+    add_phase("index build", elapsed, node_count_at_index)
+
+    outcomes = [IngestionOutcome() for _ in dois]
+    resolve_timings: list[float] = []
+    upsert_timings: list[float] = []
+    timing_lock = threading.Lock()
+
+    def resolve_and_upsert(item: tuple[int, str]) -> Optional[tuple[int, str, str]]:
+        idx, doi = item
+        outcome = outcomes[idx]
+        try:
+            outcome.parse = parse_input({"doi": doi})
+            t0 = time.perf_counter()
+            outcome.resolve = resolve_identity(outcome.parse)
+            resolve_elapsed = time.perf_counter() - t0
+            outcome.dedup = find_existing(outcome.resolve)
+            t0 = time.perf_counter()
+            outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
+            upsert_elapsed = time.perf_counter() - t0
+            with timing_lock:
+                resolve_timings.append(resolve_elapsed)
+                upsert_timings.append(upsert_elapsed)
+            citation_doi = outcome.resolve.doi or doi
+            return idx, citation_doi, outcome.upsert.slug
+        except Exception as e:
+            outcome.errors.append(str(e))
+            return None
+
+    t0 = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        phase1_results = list(executor.map(resolve_and_upsert, enumerate(dois)))
+    elapsed = time.perf_counter() - t0
+    add_phase("phase1 resolve+upsert", elapsed, len(dois))
+    add_phase("phase1 resolve_identity aggregate", sum(resolve_timings), len(resolve_timings))
+    add_phase("phase1 upsert_node aggregate", sum(upsert_timings), len(upsert_timings))
+
+    upserted = [result for result in phase1_results if result is not None]
+    t0 = time.perf_counter()
+    index = trellis.build_node_index()
+    elapsed = time.perf_counter() - t0
+    add_phase("index rebuild", elapsed, len(index))
+
+    t0 = time.perf_counter()
+    for idx, citation_doi, slug in upserted:
+        outcome = outcomes[idx]
+        try:
+            resolved = outcome.resolve
+            trellis.reverse_materialize(
+                slug,
+                doi=(resolved.doi if resolved else None) or citation_doi,
+                s2_id=resolved.s2_id if resolved else None,
+                index=index,
+            )
+        except Exception as e:
+            outcome.errors.append(str(e))
+    elapsed = time.perf_counter() - t0
+    add_phase("reverse materialize", elapsed, len(upserted))
+
+    def fetch_and_store(item: tuple[int, str, str]) -> Optional[tuple[int, str, CitationResult]]:
+        idx, doi, slug = item
+        outcome = outcomes[idx]
+        try:
+            citations = fetch_outbound_citations(doi)
+            outcome.citation_store = store_citations(slug, citations)
+            return idx, slug, citations
+        except Exception as e:
+            outcome.errors.append(str(e))
+            return None
+
+    t0 = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        phase2_results = list(executor.map(fetch_and_store, upserted))
+    elapsed = time.perf_counter() - t0
+    add_phase("phase2 fetch+store", elapsed, len(upserted))
+
+    stored = [result for result in phase2_results if result is not None]
+
+    def link_stored(item: tuple[int, str, CitationResult]) -> Optional[int]:
+        idx, slug, citations = item
+        outcome = outcomes[idx]
+        try:
+            outcome.link = link_citations(slug, citations, index=index)
+            return idx
+        except Exception as e:
+            outcome.errors.append(str(e))
+            return None
+
+    t0 = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(link_stored, stored))
+    elapsed = time.perf_counter() - t0
+    add_phase("phase3 link", elapsed, len(stored))
+
+    def verify_upserted(item: tuple[int, str, str]) -> None:
+        idx, _doi, slug = item
+        outcome = outcomes[idx]
+        try:
+            outcome.verify = verify_outcome(slug)
+        except Exception as e:
+            outcome.errors.append(str(e))
+
+    t0 = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(verify_upserted, upserted))
+    elapsed = time.perf_counter() - t0
+    add_phase("phase4 verify", elapsed, len(upserted))
+
+    metrics = BatchMetrics(
+        phases=phases,
+        total_seconds=time.perf_counter() - batch_t0,
+        workers=workers,
+        node_count_at_index=node_count_at_index,
+    )
+    return outcomes, metrics
 
 
 if __name__ == "__main__":
@@ -520,8 +731,37 @@ if __name__ == "__main__":
     parser.add_argument("--doi")
     parser.add_argument("--pmid")
     parser.add_argument("--title")
+    parser.add_argument("--batch-file", help="JSON file with list of DOIs to process in batch")
+    parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
-    raw = {k: v for k, v in vars(args).items() if v}
+    if args.batch_file:
+        with open(args.batch_file, "r", encoding="utf-8") as f:
+            dois = json.load(f)
+        if not isinstance(dois, list) or not all(isinstance(doi, str) for doi in dois):
+            parser.error("--batch-file must contain a JSON list of DOI strings")
+        outcomes, metrics = ingest_batch(dois, workers=args.workers)
+        summary = {
+            "total": len(outcomes),
+            "succeeded": sum(1 for outcome in outcomes if not outcome.errors),
+            "failed": sum(1 for outcome in outcomes if outcome.errors),
+            "created": sum(1 for outcome in outcomes if outcome.upsert and outcome.upsert.created),
+            "updated": sum(1 for outcome in outcomes if outcome.upsert and not outcome.upsert.created),
+        }
+        print(
+            json.dumps(
+                {
+                    "summary": summary,
+                    "metrics": dataclasses.asdict(metrics),
+                    "outcomes": [dataclasses.asdict(outcome) for outcome in outcomes],
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        print()
+        print(format_metrics_table(metrics))
+        raise SystemExit(0)
+    raw = {k: v for k, v in {"doi": args.doi, "pmid": args.pmid, "title": args.title}.items() if v}
     if not raw:
         parser.error("Provide at least one of --doi, --pmid, --title")
     outcome = ingest_reference_pipeline(raw)

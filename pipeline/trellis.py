@@ -7,6 +7,7 @@ this module is pure data transport between the pipeline and the graph store.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import unicodedata
 from pathlib import Path
@@ -95,6 +96,28 @@ def _normalize_doi_uri(s: str) -> str:
     return f"https://doi.org/{value.strip()}"
 
 
+def _doi_key(s: str) -> Optional[str]:
+    """Normalize DOI input to the bare lowercase DOI used for index keys."""
+    uri = _normalize_doi_uri(s or "")
+    prefix = "https://doi.org/"
+    if not uri.startswith(prefix):
+        return None
+    doi = uri[len(prefix):].strip().lower()
+    return doi or None
+
+
+def _node_identifier(node: dict) -> Optional[str]:
+    return node.get("id") or node.get("uuid") or node.get("slug")
+
+
+def _reference_metadata(node: dict) -> dict:
+    metadata = node.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return {}
+    reference = metadata.get("reference") or {}
+    return reference if isinstance(reference, dict) else {}
+
+
 # ---------------------------------------------------------------------------
 # Read operations
 # ---------------------------------------------------------------------------
@@ -136,6 +159,69 @@ def get_by_pipeline_status(status: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Batch index
+# ---------------------------------------------------------------------------
+
+def build_node_index() -> dict:
+    """
+    Build an in-memory lookup index for Trellis nodes in one subprocess call.
+
+    This is used by citation linking to avoid running the full dedup subprocess
+    chain once per cited paper.
+    """
+    index = {
+        "by_s2id": {},
+        "by_doi": {},
+        "by_pmid": {},
+        "by_title": {},
+        "pending_citations": {},
+    }
+    for node in find_nodes(limit=5000):
+        tags = node.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+        reference = _reference_metadata(node)
+        doi_values = [
+            node.get("uri", ""),
+            reference.get("uri", ""),
+            reference.get("doi", ""),
+        ]
+        doi_values.extend(reference.get("alt_dois") or [])
+        for doi_value in doi_values:
+            doi = _doi_key(doi_value)
+            if doi:
+                index["by_doi"].setdefault(doi, node)
+
+        for tag in tags:
+            tag = str(tag)
+            if tag.startswith("s2id:"):
+                s2id = tag.split(":", 1)[1].strip()
+                if s2id:
+                    index["by_s2id"].setdefault(s2id, node)
+            elif tag.startswith("pmid:"):
+                pmid = tag.split(":", 1)[1].strip()
+                if pmid:
+                    index["by_pmid"].setdefault(pmid, node)
+
+        title = _norm_title(node.get("title", ""))
+        if title:
+            index["by_title"].setdefault(title, node)
+
+        source = _node_identifier(node)
+        items = (reference.get("outbound_citations") or {}).get("items") or []
+        if source and isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                citation_doi = _doi_key(item.get("doi", ""))
+                if citation_doi:
+                    index["pending_citations"].setdefault(citation_doi, []).append((source, node))
+
+    return index
+
+
+# ---------------------------------------------------------------------------
 # Write operations
 # ---------------------------------------------------------------------------
 
@@ -152,12 +238,16 @@ def add_reference(
     """
     Add a new reference node. metadata should be the full metadata_ dict.
 
-    Always pass uri as https://doi.org/<doi>. URI is set-once at create time;
-    the Trellis CLI does not support updating it.
+    If uri is provided, preserve it in metadata.reference.uri. The Trellis CLI
+    does not support a --uri option for add.
     """
-    args = ["add", "reference", title]
     if uri:
-        args += ["--uri", uri]
+        metadata = dict(metadata or {})
+        reference = dict(metadata.get("reference") or {})
+        reference["uri"] = uri
+        metadata["reference"] = reference
+
+    args = ["add", "reference", title]
     if abstract:
         args += ["--abstract", abstract]
     if citation:
@@ -217,6 +307,24 @@ def add_child_node(
     return _unwrap_node(_run_json(*args))
 
 
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+
+
+def _is_uuid(s: str) -> bool:
+    return bool(s and _UUID_RE.match(s))
+
+
+def _resolve_to_uuid(slug_or_uuid: str) -> Optional[str]:
+    """Return UUID for a node, resolving slug → UUID via get_node if needed."""
+    if _is_uuid(slug_or_uuid):
+        return slug_or_uuid
+    try:
+        node = get_node(slug_or_uuid)
+        return node.get("id")
+    except RuntimeError:
+        return None
+
+
 def link_nodes(
     source: str,
     target: str,
@@ -227,9 +335,23 @@ def link_nodes(
     Returns {"ok": True} on success or idempotent duplicate.
     Returns {"ok": False, "error": str} on real failure.
     Never raises.
+
+    Always uses --source-uuid / --target-uuid / --relationship to avoid
+    slug ambiguity errors. Resolves slugs to UUIDs when necessary.
     """
     try:
-        _run_json("link", source, target, "--relation", relation, "--actor-id", actor_id, "--json")
+        src_uuid = source if _is_uuid(source) else _resolve_to_uuid(source)
+        tgt_uuid = target if _is_uuid(target) else _resolve_to_uuid(target)
+        if not src_uuid or not tgt_uuid:
+            return {"ok": False, "error": f"Could not resolve UUIDs: src={source} tgt={target}"}
+        _run_json(
+            "link",
+            "--source-uuid", src_uuid,
+            "--target-uuid", tgt_uuid,
+            "--relationship", relation,
+            "--actor-id", actor_id,
+            "--json",
+        )
         return {"ok": True}
     except RuntimeError as e:
         msg = str(e)
@@ -271,16 +393,60 @@ def find_by_s2id(s2id: str) -> Optional[dict]:
 
 
 def find_by_doi(doi: str) -> Optional[dict]:
-    """Check uri field first, then grep metadata for alt_dois."""
+    """Check URI/metadata DOI fields first, then grep metadata for alt_dois."""
     uri = _normalize_doi_uri(doi)
-    for node in find_nodes(text=uri):
+    bare_doi = _doi_key(doi)
+    candidates = find_nodes(text=uri)
+    if bare_doi:
+        seen = {node.get("id") or node.get("uuid") or node.get("slug") for node in candidates}
+        for node in find_nodes(text=bare_doi):
+            identity = node.get("id") or node.get("uuid") or node.get("slug")
+            if identity not in seen:
+                candidates.append(node)
+                seen.add(identity)
+
+    for node in candidates:
+        reference = _reference_metadata(node)
+        metadata_uri = reference.get("uri", "")
+        metadata_doi = reference.get("doi", "")
         if _normalize_doi_uri(node.get("uri", "")) == uri:
+            return node
+        if _normalize_doi_uri(metadata_uri) == uri:
+            return node
+        if bare_doi and _doi_key(metadata_doi) == bare_doi:
             return node
     # Catches alt_dois stored in metadata
     for node in grep_nodes(doi):
         if node.get("slug"):
             return node
     return None
+
+
+def reverse_materialize(
+    new_slug: str,
+    doi: str = None,
+    s2_id: str = None,
+    index: dict = None,
+) -> int:
+    """
+    Create pending citation edges from nodes that already cited this DOI before
+    the target node existed in Trellis.
+    """
+    if not new_slug or not index or "pending_citations" not in index or not doi:
+        return 0
+
+    key = _doi_key(doi)
+    if not key:
+        return 0
+
+    created = 0
+    for waiting_slug_or_id, _node in (index.get("pending_citations") or {}).get(key, []):
+        if not waiting_slug_or_id or waiting_slug_or_id == new_slug:
+            continue
+        result = link_nodes(waiting_slug_or_id, new_slug, "references")
+        if result.get("ok"):
+            created += 1
+    return created
 
 
 def find_by_pmid(pmid: str) -> Optional[dict]:
@@ -321,4 +487,35 @@ def dedup_check(
         node = find_by_title(title)
         if node:
             return node
+    return None
+
+
+def dedup_check_indexed(
+    index: dict,
+    s2id: str = None,
+    doi: str = None,
+    pmid: str = None,
+    title: str = None,
+) -> Optional[dict]:
+    """Full dedup chain against a pre-built node index."""
+    if s2id:
+        node = (index.get("by_s2id") or {}).get(s2id)
+        if node:
+            return node
+    if doi:
+        key = _doi_key(doi)
+        if key:
+            node = (index.get("by_doi") or {}).get(key)
+            if node:
+                return node
+    if pmid:
+        node = (index.get("by_pmid") or {}).get(str(pmid))
+        if node:
+            return node
+    if title:
+        nt = _norm_title(title)
+        if nt and len(nt) >= 10:
+            node = (index.get("by_title") or {}).get(nt)
+            if node:
+                return node
     return None

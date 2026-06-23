@@ -59,6 +59,46 @@ def citation_result(items=None):
     )
 
 
+def pubmed_xml(
+    pmid="123",
+    title="Resolved title",
+    abstract="Resolved abstract",
+    doi="10.1/x",
+    authors=None,
+    year="2024",
+    journal="Journal",
+):
+    authors = ["Author A"] if authors is None else authors
+    author_xml = ""
+    for author in authors:
+        parts = author.split(" ", 1)
+        last_name = parts[0]
+        fore_name = parts[1] if len(parts) > 1 else ""
+        author_xml += f"<Author><LastName>{last_name}</LastName><ForeName>{fore_name}</ForeName></Author>"
+    return f"""
+    <PubmedArticleSet>
+      <PubmedArticle>
+        <MedlineCitation>
+          <PMID Version="1">{pmid}</PMID>
+          <Article>
+            <Journal>
+              <Title>{journal}</Title>
+              <ISOAbbreviation>{journal}</ISOAbbreviation>
+              <JournalIssue><PubDate><Year>{year}</Year></PubDate></JournalIssue>
+            </Journal>
+            <ArticleTitle>{title}</ArticleTitle>
+            <Abstract><AbstractText>{abstract}</AbstractText></Abstract>
+            <AuthorList>{author_xml}</AuthorList>
+          </Article>
+        </MedlineCitation>
+        <PubmedData>
+          <ArticleIdList><ArticleId IdType="doi">{doi}</ArticleId></ArticleIdList>
+        </PubmedData>
+      </PubmedArticle>
+    </PubmedArticleSet>
+    """
+
+
 @pytest.fixture
 def live_trellis():
     try:
@@ -145,27 +185,14 @@ class TestIngestionUnit:
         parsed = ParseResult(None, "10.1/x", None, None, [], None, None)
         responses = [
             Response({"esearchresult": {"idlist": ["123"]}}),
-            Response(
-                {
-                    "result": {
-                        "123": {
-                            "title": "Resolved title",
-                            "articleids": [{"idtype": "doi", "value": "10.1/x"}],
-                            "authors": [{"name": "Author A"}],
-                            "pubdate": "2024 Jan",
-                            "fulljournalname": "Journal",
-                        }
-                    }
-                }
-            ),
-            Response(text="Resolved abstract"),
+            Response(text=pubmed_xml()),
             Response({"paperId": "s2", "externalIds": {"DOI": "10.1/x"}}),
         ]
         with patch("pipeline.ingestion.requests.get", side_effect=responses) as get:
             result = ingestion.resolve_identity(parsed)
         assert result.title == "Resolved title"
         assert result.source == "pubmed"
-        assert get.called
+        assert get.call_count == 3
 
     def test_resolve_s2_hit_path_no_pubmed_call(self):
         parsed = ParseResult(None, "10.1/x", None, None, [], None, None)
@@ -324,8 +351,8 @@ class TestIngestionUnit:
         assert add.call_args.kwargs["metadata"]["reference"]["doi"] is None
 
     def test_upsert_updates_existing_node(self):
-        existing = {"slug": "old"}
-        with patch("pipeline.ingestion.trellis.get_node", return_value={"slug": "old", "metadata": {}, "tags": []}), patch(
+        existing = {"slug": "old", "metadata": {}, "tags": []}
+        with patch("pipeline.ingestion.trellis.get_node") as get_node, patch(
             "pipeline.ingestion.trellis.update_node", return_value={"slug": "old"}
         ) as update, patch(
             "pipeline.ingestion.trellis.annotate_node"
@@ -333,6 +360,7 @@ class TestIngestionUnit:
             result = ingestion.upsert_node(resolved(), DedupResult(existing, "doi"))
         assert result == UpsertResult(slug="old", created=False)
         assert update.call_args.kwargs["tags"][0] == "pipeline:scaffolded"
+        get_node.assert_not_called()
 
     def test_upsert_preserves_existing_metadata(self):
         existing_node = {
@@ -340,30 +368,32 @@ class TestIngestionUnit:
             "metadata": {"reference": {"doi": "10.old/x", "custom": "keep"}, "other": {"x": 1}},
             "tags": ["pipeline:queued"],
         }
-        with patch("pipeline.ingestion.trellis.get_node", return_value=existing_node), patch(
+        with patch("pipeline.ingestion.trellis.get_node") as get_node, patch(
             "pipeline.ingestion.trellis.update_node", return_value={"slug": "old"}
         ) as update, patch(
             "pipeline.ingestion.trellis.annotate_node"
         ):
-            ingestion.upsert_node(resolved(), DedupResult({"slug": "old"}, "doi"))
+            ingestion.upsert_node(resolved(), DedupResult(existing_node, "doi"))
         metadata = update.call_args.kwargs["metadata"]
         assert update.call_args.kwargs["tags"][0] == "pipeline:scaffolded"
         assert metadata["reference"]["doi"] == "10.old/x"
         assert metadata["reference"]["custom"] == "keep"
         assert metadata["other"] == {"x": 1}
+        get_node.assert_not_called()
 
     def test_upsert_existing_node_empty_metadata_produces_reference_metadata(self):
         existing_node = {"slug": "old", "metadata": {}, "tags": []}
-        with patch("pipeline.ingestion.trellis.get_node", return_value=existing_node), patch(
+        with patch("pipeline.ingestion.trellis.get_node") as get_node, patch(
             "pipeline.ingestion.trellis.update_node", return_value={"slug": "old"}
         ) as update, patch(
             "pipeline.ingestion.trellis.annotate_node"
         ):
-            ingestion.upsert_node(resolved(), DedupResult({"slug": "old"}, "doi"))
+            ingestion.upsert_node(resolved(), DedupResult(existing_node, "doi"))
         reference = update.call_args.kwargs["metadata"]["reference"]
         assert reference["schema"] == "reference-v1"
         assert reference["doi"] == "10.1/x"
         assert reference["pmid"] == "123"
+        get_node.assert_not_called()
 
     def test_upsert_citation_string_three_authors_joins_all_names(self):
         with patch("pipeline.ingestion.trellis.add_reference", return_value={"slug": "new"}) as add, patch(
