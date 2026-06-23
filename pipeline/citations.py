@@ -7,12 +7,13 @@ No Trellis interaction.
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
 import requests
+
+from pipeline._http import http_get, S2_LIMITER
 
 
 @dataclass
@@ -53,11 +54,7 @@ def fetch_outbound_citations(doi: str) -> CitationResult:
         headers["x-api-key"] = api_key
 
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=30)
-        if response.status_code == 429:
-            time.sleep(3)
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
+        response = http_get(url, params=params, headers=headers, limiter=S2_LIMITER, timeout=30)
         payload = response.json()
     except requests.RequestException:
         return _empty_result("semantic-scholar-failed")

@@ -29,6 +29,7 @@ import xml.etree.ElementTree as ET
 import requests
 
 from pipeline.citations import CitationResult, fetch_outbound_citations
+from pipeline._http import http_get, NCBI_LIMITER, S2_LIMITER, CROSSREF_LIMITER
 from pipeline import trellis
 
 
@@ -228,12 +229,12 @@ def _pubmed_search(parsed: ParseResult) -> Optional[str]:
     api_key = os.getenv("NCBI_API_KEY")
     if api_key:
         params["api_key"] = api_key
-    response = requests.get(
+    response = http_get(
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
         params=params,
+        limiter=NCBI_LIMITER,
         timeout=30,
     )
-    response.raise_for_status()
     ids = response.json().get("esearchresult", {}).get("idlist", [])
     return ids[0] if ids else None
 
@@ -250,12 +251,12 @@ def _pubmed_fetch(pmid: str) -> dict:
     api_key = os.getenv("NCBI_API_KEY")
     if api_key:
         params["api_key"] = api_key
-    response = requests.get(
+    response = http_get(
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
         params=params,
+        limiter=NCBI_LIMITER,
         timeout=30,
     )
-    response.raise_for_status()
     root = ET.fromstring(response.text)
 
     abstract_parts = [
@@ -336,13 +337,13 @@ def _fill_from_s2(fields: dict) -> str:
     if api_key:
         headers["x-api-key"] = api_key
     try:
-        response = requests.get(
+        response = http_get(
             f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}",
             params={"fields": "paperId,title,abstract,authors,year,venue,externalIds"},
             headers=headers,
+            limiter=S2_LIMITER,
             timeout=30,
         )
-        response.raise_for_status()
         payload = response.json()
     except requests.RequestException:
         return fields["source"]
@@ -367,6 +368,63 @@ def _fill_from_s2(fields: dict) -> str:
         )
     )
     return "semantic-scholar" if fields["source"] == "input-only" else fields["source"]
+
+
+def _crossref_year(msg: dict) -> Optional[str]:
+    for key in ("published", "published-print", "published-online"):
+        parts = ((msg.get(key) or {}).get("date-parts") or [[]])
+        if not parts or not parts[0]:
+            continue
+        year = parts[0][0]
+        if isinstance(year, int) and 1000 <= year <= 9999:
+            return str(year)
+        if isinstance(year, str) and year.isdigit() and len(year) == 4:
+            return year
+    return None
+
+
+def _fill_from_crossref(fields: dict) -> str:
+    doi = fields.get("doi")
+    if not doi:
+        return fields["source"]
+    email = os.getenv("CROSSREF_EMAIL")
+    params = {"mailto": email} if email else {}
+    try:
+        resp = http_get(
+            f"https://api.crossref.org/works/{doi}",
+            params=params,
+            limiter=CROSSREF_LIMITER,
+            timeout=30,
+        )
+        msg = resp.json().get("message", {})
+    except (requests.RequestException, ValueError):
+        return fields["source"]
+
+    titles = msg.get("title") or []
+    venues = msg.get("container-title") or []
+    authors = []
+    for author in msg.get("author") or []:
+        given = _blank_to_none(author.get("given"))
+        family = _blank_to_none(author.get("family"))
+        if given and family:
+            authors.append(f"{given} {family}")
+        elif family:
+            authors.append(family)
+
+    fields.update(
+        _merge_missing(
+            fields,
+            {
+                "title": titles[0] if titles else None,
+                "doi": _bare_doi(msg.get("DOI")),
+                "authors": authors,
+                "year": _crossref_year(msg),
+                "venue": venues[0] if venues else None,
+                "abstract": msg.get("abstract") or None,
+            },
+        )
+    )
+    return "crossref" if fields["source"] == "input-only" else fields["source"]
 
 
 def resolve_identity(parsed: ParseResult) -> ResolveResult:
@@ -394,6 +452,8 @@ def resolve_identity(parsed: ParseResult) -> ResolveResult:
     if not has_sufficient_title_only_metadata:
         fields["source"] = _fill_from_pubmed(parsed, fields)
         fields["source"] = _fill_from_s2(fields)
+        if not _blank_to_none(fields.get("title")):
+            fields["source"] = _fill_from_crossref(fields)
 
     title = _blank_to_none(fields.get("title"))
     if not title:

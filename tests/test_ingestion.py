@@ -221,6 +221,7 @@ class TestIngestionUnit:
         responses = [
             Response({"esearchresult": {"idlist": []}}),
             Response({"externalIds": {"DOI": "10.1/x"}}),
+            Response({"message": {}}),
         ]
         with patch("pipeline.ingestion.requests.get", side_effect=responses):
             with pytest.raises(ValueError):
@@ -231,6 +232,7 @@ class TestIngestionUnit:
         responses = [
             Response({"esearchresult": {"idlist": []}}),
             Response({}),
+            Response({"message": {}}),
         ]
         with patch("pipeline.ingestion.requests.get", side_effect=responses):
             with pytest.raises(ValueError):
