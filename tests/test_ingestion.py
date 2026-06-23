@@ -172,12 +172,78 @@ class TestIngestionUnit:
                 publication_types=["Review"],
                 mesh_terms=["Gastrointestinal Microbiome"],
                 keywords=["16S rRNA"],
+                chemicals=["Butyrates"],
+                mesh_major=["Inflammation"],
+                mesh_qualifiers=["metabolism"],
             )
         )
         assert "field:biology" in tags
         assert "type:review" in tags
         assert "mesh:gastrointestinal-microbiome" in tags
         assert "kw:16s-rrna" in tags
+        assert "chem:butyrates" in tags
+        assert "mesh-major:inflammation" in tags
+        assert "mesh-q:metabolism" in tags
+
+    def test_pubmed_fetch_topical_breadth_axes_feed_tags(self):
+        xml = """
+        <PubmedArticleSet>
+          <PubmedArticle>
+            <MedlineCitation>
+              <PMID Version="1">123</PMID>
+              <ChemicalList>
+                <Chemical><NameOfSubstance>Butyrates</NameOfSubstance></Chemical>
+                <Chemical><NameOfSubstance>Butyrates</NameOfSubstance></Chemical>
+                <Chemical><NameOfSubstance> </NameOfSubstance></Chemical>
+              </ChemicalList>
+              <MeshHeadingList>
+                <MeshHeading>
+                  <DescriptorName MajorTopicYN="Y">Gastrointestinal Microbiome</DescriptorName>
+                  <QualifierName MajorTopicYN="N">genetics</QualifierName>
+                </MeshHeading>
+                <MeshHeading>
+                  <DescriptorName MajorTopicYN="N">Inflammation</DescriptorName>
+                  <QualifierName MajorTopicYN="Y">metabolism</QualifierName>
+                  <QualifierName MajorTopicYN="N">metabolism</QualifierName>
+                </MeshHeading>
+              </MeshHeadingList>
+              <Article>
+                <Journal><Title>Journal</Title></Journal>
+                <ArticleTitle>Resolved title</ArticleTitle>
+                <Abstract><AbstractText>Resolved abstract</AbstractText></Abstract>
+                <PublicationTypeList>
+                  <PublicationType>Journal Article</PublicationType>
+                  <PublicationType>Review</PublicationType>
+                  <PublicationType>Review</PublicationType>
+                </PublicationTypeList>
+              </Article>
+            </MedlineCitation>
+          </PubmedArticle>
+        </PubmedArticleSet>
+        """
+        with patch("pipeline.ingestion.http_get", return_value=Response(text=xml)):
+            fetched = ingestion._pubmed_fetch("123")
+
+        assert fetched["chemicals"] == ["Butyrates"]
+        assert fetched["mesh_major"] == ["Gastrointestinal Microbiome", "Inflammation"]
+        assert fetched["mesh_qualifiers"] == ["genetics", "metabolism"]
+        assert fetched["publication_types"] == ["Journal Article", "Review"]
+
+        tags = ingestion._make_tags(
+            resolved(
+                publication_types=fetched["publication_types"],
+                chemicals=fetched["chemicals"],
+                mesh_major=fetched["mesh_major"],
+                mesh_qualifiers=fetched["mesh_qualifiers"],
+            )
+        )
+        assert "chem:butyrates" in tags
+        assert "mesh-major:gastrointestinal-microbiome" in tags
+        assert "mesh-major:inflammation" in tags
+        assert "mesh-q:genetics" in tags
+        assert "mesh-q:metabolism" in tags
+        assert "type:journal-article" in tags
+        assert "type:review" in tags
 
     # resolve_identity
     def test_resolve_doi_input_attempts_s2_when_title_present(self):

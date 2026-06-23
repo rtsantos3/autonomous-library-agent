@@ -80,6 +80,9 @@ class ResolveResult:
     publication_types: list[str] = field(default_factory=list)
     mesh_terms: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
+    chemicals: list[str] = field(default_factory=list)
+    mesh_major: list[str] = field(default_factory=list)
+    mesh_qualifiers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -189,6 +192,18 @@ def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) ->
         slug = slugify(value)
         if slug:
             tags.append(f"kw:{slug}")
+    for value in resolved.chemicals:
+        slug = slugify(value)
+        if slug:
+            tags.append(f"chem:{slug}")
+    for value in resolved.mesh_major:
+        slug = slugify(value)
+        if slug:
+            tags.append(f"mesh-major:{slug}")
+    for value in resolved.mesh_qualifiers:
+        slug = slugify(value)
+        if slug:
+            tags.append(f"mesh-q:{slug}")
     return list(dict.fromkeys(tags))
 
 
@@ -326,6 +341,34 @@ def _pubmed_fetch(pmid: str) -> dict:
         for text in (_element_text(element) for element in root.findall(".//KeywordList/Keyword"))
         if text
     ]
+    chemicals = [
+        text
+        for text in (_element_text(element) for element in root.findall(".//ChemicalList/Chemical/NameOfSubstance"))
+        if text
+    ]
+    mesh_major = []
+    # PubMed marks major topics on either the descriptor itself or a qualifier
+    # inside the same MeshHeading, so inspect each heading instead of only the
+    # flat DescriptorName path used for the broader mesh axis.
+    for heading in root.findall(".//MeshHeading"):
+        descriptor = heading.find("DescriptorName")
+        descriptor_text = _element_text(descriptor)
+        descriptor_major = descriptor is not None and descriptor.get("MajorTopicYN") == "Y"
+        qualifier_major = any(
+            qualifier.get("MajorTopicYN") == "Y" for qualifier in heading.findall("QualifierName")
+        )
+        if descriptor_text and (descriptor_major or qualifier_major):
+            mesh_major.append(descriptor_text)
+    mesh_qualifiers = [
+        text
+        for text in (_element_text(element) for element in root.findall(".//MeshHeading/QualifierName"))
+        if text
+    ]
+    publication_types = [
+        text
+        for text in (_element_text(element) for element in root.findall(".//PublicationType"))
+        if text
+    ]
 
     return {
         "title": _element_text(root.find(".//ArticleTitle")),
@@ -337,6 +380,10 @@ def _pubmed_fetch(pmid: str) -> dict:
         "pmid": fetched_pmid or pmid,
         "mesh": mesh,
         "keywords": keywords,
+        "chemicals": extend_unique([], chemicals),
+        "mesh_major": extend_unique([], mesh_major),
+        "mesh_qualifiers": extend_unique([], mesh_qualifiers),
+        "publication_types": extend_unique([], publication_types),
     }
 
 
@@ -362,6 +409,10 @@ def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
         )
         extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
         extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
+        extend_unique(fields.setdefault("chemicals", []), fetched.get("chemicals") or [])
+        extend_unique(fields.setdefault("mesh_major", []), fetched.get("mesh_major") or [])
+        extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
+        extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
         return "pubmed"
     except (requests.RequestException, ET.ParseError):
         return fields["source"]
@@ -494,6 +545,9 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
         "publication_types": [],
         "mesh_terms": [],
         "keywords": [],
+        "chemicals": [],
+        "mesh_major": [],
+        "mesh_qualifiers": [],
     }
     has_sufficient_title_only_metadata = (
         parsed.title
@@ -549,6 +603,10 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
                 )
                 extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
                 extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
+                extend_unique(fields.setdefault("chemicals", []), fetched.get("chemicals") or [])
+                extend_unique(fields.setdefault("mesh_major", []), fetched.get("mesh_major") or [])
+                extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
+                extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
             except (requests.RequestException, ET.ParseError):
                 pass
 
@@ -588,6 +646,9 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
         publication_types=fields.get("publication_types") or [],
         mesh_terms=fields.get("mesh_terms") or [],
         keywords=fields.get("keywords") or [],
+        chemicals=fields.get("chemicals") or [],
+        mesh_major=fields.get("mesh_major") or [],
+        mesh_qualifiers=fields.get("mesh_qualifiers") or [],
     )
 
 
