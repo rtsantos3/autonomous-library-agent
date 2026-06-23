@@ -23,3 +23,6 @@ diag.py
 # Editor
 .DS_Store
 *.swp
+
+# Benchmark results — accumulate locally, not committed
+tests/results/
