@@ -79,7 +79,11 @@ elif [ -f "$GRAPH_EXPORT" ]; then
   ( cd "$WS" && { trellis init >/dev/null 2>&1 || true; } && trellis import --path "$GRAPH_EXPORT" )
   ok "imported graph topology into $WS/.trellis"
 else
-  warn "no workspace and no graph export yet — an empty workspace is created on first use."
+  # No existing workspace and no committed topology to import — instantiate a
+  # fresh, empty Trellis db so the pipeline has a workspace to write into.
+  say "Instantiating an empty Trellis workspace"
+  ( cd "$WS" && trellis init )
+  ok "created empty workspace at $WS/.trellis"
   warn "once you have a graph, snapshot it with scripts/export_graph.sh and commit graph/trellis_export.jsonl."
 fi
 
