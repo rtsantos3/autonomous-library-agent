@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import concurrent.futures
 import json
+import logging
 import os
 import threading
 import time
@@ -28,13 +29,15 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from pipeline._utils import extend_unique, slugify
+from pipeline._utils import bare_doi, extend_unique, slugify
 from pipeline.citations import CitationResult, fetch_outbound_citations
 from pipeline._http import http_get, NCBI_LIMITER, S2_LIMITER, CROSSREF_LIMITER
 from pipeline import trellis
 
 if TYPE_CHECKING:
     from pipeline.aggregator import BatchResolved
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -136,18 +139,6 @@ def _blank_to_none(value):
     return value
 
 
-def _bare_doi(value: Optional[str]) -> Optional[str]:
-    value = _blank_to_none(value)
-    if not value:
-        return None
-    lower = value.lower()
-    for prefix in ("doi:", "https://doi.org/", "http://dx.doi.org/"):
-        if lower.startswith(prefix):
-            value = value[len(prefix):]
-            break
-    return value.strip().lower() or None
-
-
 def _canonical_doi_uri(doi: Optional[str]) -> Optional[str]:
     return f"https://doi.org/{doi}" if doi else None
 
@@ -171,7 +162,7 @@ def _prefer_canonical_doi(fields: dict, candidate_doi: Optional[str]) -> None:
     # input DOI, promote the canonical one and retain the original as an alt so
     # dedup still matches records ingested under the older identifier. Unlike
     # _merge_missing this intentionally overwrites an already-populated DOI.
-    canonical = _bare_doi(candidate_doi)
+    canonical = bare_doi(candidate_doi)
     if not canonical or canonical == fields.get("doi"):
         return
     if fields.get("doi"):
@@ -247,7 +238,7 @@ def _citation_string(resolved: ResolveResult) -> str:
 
 def parse_input(raw: dict) -> ParseResult:
     title = _blank_to_none(raw.get("title"))
-    doi = _bare_doi(raw.get("doi"))
+    doi = bare_doi(raw.get("doi"))
     pmid = _blank_to_none(raw.get("pmid"))
     abstract = _blank_to_none(raw.get("abstract"))
     authors = raw.get("authors") or []
@@ -331,7 +322,7 @@ def _pubmed_fetch(pmid: str) -> dict:
     doi = None
     for article_id in root.findall(".//ArticleId"):
         if (article_id.get("IdType") or "").lower() == "doi":
-            doi = _bare_doi(_element_text(article_id))
+            doi = bare_doi(_element_text(article_id))
             break
 
     fetched_pmid = None
@@ -418,7 +409,9 @@ def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
         extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
         extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
         return "pubmed"
-    except (requests.RequestException, ET.ParseError):
+    except (requests.RequestException, ET.ParseError) as exc:
+        identifier = parsed.pmid or parsed.doi or parsed.title
+        logger.warning("_fill_from_pubmed identifier=%r failed: %s", identifier, exc)
         return fields["source"]
 
 
@@ -456,7 +449,7 @@ def _fill_from_s2(fields: dict) -> str:
             fields,
             {
                 "title": payload.get("title"),
-                "doi": _bare_doi(external_ids.get("DOI")),
+                "doi": bare_doi(external_ids.get("DOI")),
                 "pmid": external_ids.get("PubMed"),
                 "s2_id": payload.get("paperId"),
                 "abstract": payload.get("abstract"),
@@ -503,7 +496,8 @@ def _fill_from_crossref(fields: dict) -> str:
             timeout=30,
         )
         msg = resp.json().get("message", {})
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("_fill_from_crossref doi=%r failed: %s", doi, exc)
         return fields["source"]
 
     titles = msg.get("title") or []
@@ -522,7 +516,7 @@ def _fill_from_crossref(fields: dict) -> str:
             fields,
             {
                 "title": titles[0] if titles else None,
-                "doi": _bare_doi(msg.get("DOI")),
+                "doi": bare_doi(msg.get("DOI")),
                 "authors": authors,
                 "year": _crossref_year(msg),
                 "venue": venues[0] if venues else None,
@@ -611,7 +605,8 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
                 extend_unique(fields.setdefault("mesh_major", []), fetched.get("mesh_major") or [])
                 extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
                 extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
-            except (requests.RequestException, ET.ParseError):
+            except (requests.RequestException, ET.ParseError) as exc:
+                logger.warning("resolve_identity prefetched pubmed pmid=%r failed: %s", pmid, exc)
                 pass
 
     needs_enrichment = any(
@@ -637,7 +632,7 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
 
     return ResolveResult(
         title=title,
-        doi=_bare_doi(fields.get("doi")),
+        doi=bare_doi(fields.get("doi")),
         pmid=_blank_to_none(fields.get("pmid")),
         s2_id=_blank_to_none(fields.get("s2_id")),
         abstract=_blank_to_none(fields.get("abstract")),
@@ -787,7 +782,8 @@ def verify_outcome(slug: str) -> VerifyResult:
             pipeline_status=pipeline_status,
             edge_count=edge_count,
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("verify_outcome slug=%r failed: %s", slug, exc)
         return VerifyResult(
             node_exists=False,
             has_citation_metadata=False,
@@ -835,6 +831,87 @@ def format_metrics_table(metrics: BatchMetrics) -> str:
     return "\n".join(lines)
 
 
+def resolve_and_upsert(
+    item: tuple[int, str],
+    outcomes: list[IngestionOutcome],
+    prefetched_for_doi,
+    resolve_timings: list[float],
+    upsert_timings: list[float],
+    timing_lock: threading.Lock,
+) -> Optional[tuple[int, str, str]]:
+    idx, doi = item
+    outcome = outcomes[idx]
+    try:
+        outcome.parse = parse_input({"doi": doi})
+        t0 = time.perf_counter()
+        outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched_for_doi(doi))
+        resolve_elapsed = time.perf_counter() - t0
+        outcome.dedup = find_existing(outcome.resolve)
+        t0 = time.perf_counter()
+        outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
+        upsert_elapsed = time.perf_counter() - t0
+        with timing_lock:
+            resolve_timings.append(resolve_elapsed)
+            upsert_timings.append(upsert_elapsed)
+        citation_doi = outcome.resolve.doi or doi
+        return idx, citation_doi, outcome.upsert.slug
+    except Exception as e:
+        outcome.errors.append(str(e))
+        return None
+
+
+def fetch_and_store(
+    item: tuple[int, str, str],
+    outcomes: list[IngestionOutcome],
+    prefetched_for_doi,
+    dois: list[str],
+) -> Optional[tuple[int, str, CitationResult]]:
+    idx, doi, slug = item
+    outcome = outcomes[idx]
+    try:
+        prefetched = prefetched_for_doi(dois[idx])
+        if prefetched is not None and prefetched.citations:
+            citations = CitationResult(
+                source="s2-batch",
+                retrieved_at=date.today().isoformat(),
+                items=prefetched.citations,
+            )
+        else:
+            citations = fetch_outbound_citations(doi)
+        outcome.citation_store = store_citations(slug, citations)
+        return idx, slug, citations
+    except Exception as e:
+        outcome.errors.append(str(e))
+        return None
+
+
+def link_stored(
+    item: tuple[int, str, CitationResult],
+    outcomes: list[IngestionOutcome],
+    index: dict,
+) -> Optional[int]:
+    idx, slug, citations = item
+    outcome = outcomes[idx]
+    try:
+        outcome.link = link_citations(slug, citations, index=index)
+        return idx
+    except Exception as e:
+        outcome.errors.append(str(e))
+        return None
+
+
+def verify_upserted(
+    item: tuple[int, str, str],
+    outcomes: list[IngestionOutcome],
+) -> None:
+    idx, _doi, slug = item
+    outcome = outcomes[idx]
+    try:
+        outcome.verify = verify_outcome(slug)
+    except Exception as e:
+        outcome.errors.append(str(e))
+
+
 def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutcome], BatchMetrics]:
     batch_t0 = time.perf_counter()
     phases: list[PhaseMetrics] = []
@@ -858,7 +935,7 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
     add_phase("phase0 batch resolve", elapsed, len(dois))
 
     def prefetched_for_doi(doi: str):
-        key = _bare_doi(doi)
+        key = bare_doi(doi)
         return resolved_map.get(key.lower()) if key else None
 
     t0 = time.perf_counter()
@@ -872,30 +949,21 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
     upsert_timings: list[float] = []
     timing_lock = threading.Lock()
 
-    def resolve_and_upsert(item: tuple[int, str]) -> Optional[tuple[int, str, str]]:
-        idx, doi = item
-        outcome = outcomes[idx]
-        try:
-            outcome.parse = parse_input({"doi": doi})
-            t0 = time.perf_counter()
-            outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched_for_doi(doi))
-            resolve_elapsed = time.perf_counter() - t0
-            outcome.dedup = find_existing(outcome.resolve)
-            t0 = time.perf_counter()
-            outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
-            upsert_elapsed = time.perf_counter() - t0
-            with timing_lock:
-                resolve_timings.append(resolve_elapsed)
-                upsert_timings.append(upsert_elapsed)
-            citation_doi = outcome.resolve.doi or doi
-            return idx, citation_doi, outcome.upsert.slug
-        except Exception as e:
-            outcome.errors.append(str(e))
-            return None
-
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        phase1_results = list(executor.map(resolve_and_upsert, enumerate(dois)))
+        phase1_results = list(
+            executor.map(
+                lambda item: resolve_and_upsert(
+                    item,
+                    outcomes,
+                    prefetched_for_doi,
+                    resolve_timings,
+                    upsert_timings,
+                    timing_lock,
+                ),
+                enumerate(dois),
+            )
+        )
     elapsed = time.perf_counter() - t0
     add_phase("phase1 resolve+upsert", elapsed, len(dois))
     add_phase("phase1 resolve_identity aggregate", sum(resolve_timings), len(resolve_timings))
@@ -923,60 +991,28 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
     elapsed = time.perf_counter() - t0
     add_phase("reverse materialize", elapsed, len(upserted))
 
-    def fetch_and_store(item: tuple[int, str, str]) -> Optional[tuple[int, str, CitationResult]]:
-        idx, doi, slug = item
-        outcome = outcomes[idx]
-        try:
-            prefetched = prefetched_for_doi(dois[idx])
-            if prefetched is not None and prefetched.citations:
-                citations = CitationResult(
-                    source="s2-batch",
-                    retrieved_at=date.today().isoformat(),
-                    items=prefetched.citations,
-                )
-            else:
-                citations = fetch_outbound_citations(doi)
-            outcome.citation_store = store_citations(slug, citations)
-            return idx, slug, citations
-        except Exception as e:
-            outcome.errors.append(str(e))
-            return None
-
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        phase2_results = list(executor.map(fetch_and_store, upserted))
+        phase2_results = list(
+            executor.map(
+                lambda item: fetch_and_store(item, outcomes, prefetched_for_doi, dois),
+                upserted,
+            )
+        )
     elapsed = time.perf_counter() - t0
     add_phase("phase2 fetch+store", elapsed, len(upserted))
 
     stored = [result for result in phase2_results if result is not None]
 
-    def link_stored(item: tuple[int, str, CitationResult]) -> Optional[int]:
-        idx, slug, citations = item
-        outcome = outcomes[idx]
-        try:
-            outcome.link = link_citations(slug, citations, index=index)
-            return idx
-        except Exception as e:
-            outcome.errors.append(str(e))
-            return None
-
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(link_stored, stored))
+        list(executor.map(lambda item: link_stored(item, outcomes, index), stored))
     elapsed = time.perf_counter() - t0
     add_phase("phase3 link", elapsed, len(stored))
 
-    def verify_upserted(item: tuple[int, str, str]) -> None:
-        idx, _doi, slug = item
-        outcome = outcomes[idx]
-        try:
-            outcome.verify = verify_outcome(slug)
-        except Exception as e:
-            outcome.errors.append(str(e))
-
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(verify_upserted, upserted))
+        list(executor.map(lambda item: verify_upserted(item, outcomes), upserted))
     elapsed = time.perf_counter() - t0
     add_phase("phase4 verify", elapsed, len(upserted))
 

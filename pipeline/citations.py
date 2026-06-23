@@ -6,6 +6,7 @@ No Trellis interaction.
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import date
@@ -14,6 +15,8 @@ from typing import Optional
 import requests
 
 from pipeline._http import http_get, S2_LIMITER
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -56,9 +59,11 @@ def fetch_outbound_citations(doi: str) -> CitationResult:
     try:
         response = http_get(url, params=params, headers=headers, limiter=S2_LIMITER, timeout=30)
         payload = response.json()
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        logger.warning("fetch_outbound_citations doi=%s request failed: %s", doi, exc)
         return _empty_result("semantic-scholar-failed")
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("fetch_outbound_citations doi=%s json decode failed: %s", doi, exc)
         return _empty_result("semantic-scholar-failed")
 
     items: list[CitationItem] = []

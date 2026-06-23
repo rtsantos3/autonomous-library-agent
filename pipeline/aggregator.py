@@ -7,7 +7,7 @@ from typing import Optional
 
 import requests
 
-from pipeline._utils import extend_unique
+from pipeline._utils import bare_doi, extend_unique
 from pipeline._http import S2_LIMITER, http_post
 from pipeline.citations import CitationItem
 
@@ -41,6 +41,14 @@ def _normalize_doi(value: Optional[str]) -> Optional[str]:
     return str(value).strip().lower() or None
 
 
+def _coerce_year(value) -> Optional[int]:
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
 def _citation_from_reference(ref: dict) -> Optional[CitationItem]:
     external_ids = (ref or {}).get("externalIds") or {}
     doi = _normalize_doi(external_ids.get("DOI"))
@@ -55,7 +63,7 @@ def _citation_from_reference(ref: dict) -> Optional[CitationItem]:
         pmid=pmid,
         s2_id=None,
         title=title,
-        year=(ref or {}).get("year"),
+        year=_coerce_year((ref or {}).get("year")),
     )
 
 
@@ -88,13 +96,9 @@ def _build_resolved(entry: dict) -> BatchResolved:
 
 
 def batch_resolve(dois: list[str], chunk_size: int = 500) -> dict[str, BatchResolved]:
-    # Lazy import avoids a module cycle: ingestion uses this aggregator for batch
-    # prefetching, while the aggregator needs ingestion's canonical DOI cleanup.
-    from pipeline.ingestion import _bare_doi
-
     normalized: list[tuple[str, str]] = []
     for doi in dois:
-        key = _bare_doi(doi)
+        key = bare_doi(doi)
         if key:
             normalized.append((key.lower(), key))
 

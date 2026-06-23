@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
-__all__: List[str] = ["slugify", "extend_unique"]
+__all__: List[str] = ["slugify", "extend_unique", "bare_doi"]
 
 
 def slugify(text) -> Optional[str]:
@@ -25,3 +25,18 @@ def extend_unique(target: list, incoming) -> list:
             target.append(text)
             seen.add(text)
     return target
+
+
+def bare_doi(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    lower = value.lower()
+    for prefix in ("doi:", "https://doi.org/", "http://dx.doi.org/"):
+        if lower.startswith(prefix):
+            value = value[len(prefix):]
+            break
+    return value.strip().lower() or None

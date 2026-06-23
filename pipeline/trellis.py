@@ -7,6 +7,7 @@ this module is pure data transport between the pipeline and the graph store.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import unicodedata
@@ -24,6 +25,7 @@ PROJECT_ROOT = os.environ.get(
 )
 PROJECT_SLUG = "microbiome-research-library"
 ACTOR = "daedalus"
+logger = logging.getLogger(__name__)
 
 PIPELINE_TAGS = {
     "pipeline:queued",
@@ -137,7 +139,8 @@ def find_nodes(text: str = None, tag: str = None, limit: int = None) -> list[dic
     args.append("--json")
     try:
         raw = _run(*args)
-    except RuntimeError:
+    except RuntimeError as exc:
+        logger.warning("find_nodes text=%r tag=%r failed: %s", text, tag, exc)
         return []
     return _unwrap_list(json.loads(raw)) if raw else []
 
@@ -146,7 +149,8 @@ def grep_nodes(query: str) -> list[dict]:
     """Full-text grep across all node fields including metadata JSON."""
     try:
         raw = _run("grep", query, "--json")
-    except RuntimeError:
+    except RuntimeError as exc:
+        logger.warning("grep_nodes query=%r failed: %s", query, exc)
         return []
     if not raw:
         return []
