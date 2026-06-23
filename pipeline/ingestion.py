@@ -19,19 +19,22 @@ import dataclasses
 import concurrent.futures
 import json
 import os
-import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import date
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import xml.etree.ElementTree as ET
 
 import requests
 
+from pipeline._utils import extend_unique, slugify
 from pipeline.citations import CitationResult, fetch_outbound_citations
 from pipeline._http import http_get, NCBI_LIMITER, S2_LIMITER, CROSSREF_LIMITER
 from pipeline import trellis
+
+if TYPE_CHECKING:
+    from pipeline.aggregator import BatchResolved
 
 
 @dataclass
@@ -161,25 +164,6 @@ def _merge_missing(existing: dict, incoming: dict) -> dict:
     return merged
 
 
-def _extend_unique(fields: dict, key: str, values) -> None:
-    current = fields.setdefault(key, [])
-    seen = set(current)
-    for value in values or []:
-        if value in (None, "", []):
-            continue
-        text = str(value).strip()
-        if text and text not in seen:
-            current.append(text)
-            seen.add(text)
-
-
-def _slug(text):
-    if text is None:
-        return None
-    slug = re.sub(r"[^0-9a-z]+", "-", str(text).strip().lower()).strip("-")
-    return slug or None
-
-
 def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) -> list[str]:
     tags = [t for t in (existing_tags or []) if not str(t).startswith("pipeline:")]
     tags.append("pipeline:scaffolded")
@@ -190,19 +174,19 @@ def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) ->
     if resolved.year:
         tags.append(f"year:{resolved.year}")
     for value in resolved.fields_of_study:
-        slug = _slug(value)
+        slug = slugify(value)
         if slug:
             tags.append(f"field:{slug}")
     for value in resolved.publication_types:
-        slug = _slug(value)
+        slug = slugify(value)
         if slug:
             tags.append(f"type:{slug}")
     for value in resolved.mesh_terms:
-        slug = _slug(value)
+        slug = slugify(value)
         if slug:
             tags.append(f"mesh:{slug}")
     for value in resolved.keywords:
-        slug = _slug(value)
+        slug = slugify(value)
         if slug:
             tags.append(f"kw:{slug}")
     return list(dict.fromkeys(tags))
@@ -376,8 +360,8 @@ def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
                 },
             )
         )
-        _extend_unique(fields, "mesh_terms", fetched.get("mesh") or [])
-        _extend_unique(fields, "keywords", fetched.get("keywords") or [])
+        extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
+        extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
         return "pubmed"
     except (requests.RequestException, ET.ParseError):
         return fields["source"]
@@ -427,13 +411,12 @@ def _fill_from_s2(fields: dict) -> str:
             },
         )
     )
-    _extend_unique(fields, "fields_of_study", payload.get("fieldsOfStudy") or [])
-    _extend_unique(
-        fields,
-        "fields_of_study",
+    extend_unique(fields.setdefault("fields_of_study", []), payload.get("fieldsOfStudy") or [])
+    extend_unique(
+        fields.setdefault("fields_of_study", []),
         [item.get("category") for item in payload.get("s2FieldsOfStudy") or [] if isinstance(item, dict)],
     )
-    _extend_unique(fields, "publication_types", payload.get("publicationTypes") or [])
+    extend_unique(fields.setdefault("publication_types", []), payload.get("publicationTypes") or [])
     return "semantic-scholar" if fields["source"] == "input-only" else fields["source"]
 
 
@@ -491,7 +474,7 @@ def _fill_from_crossref(fields: dict) -> str:
             },
         )
     )
-    _extend_unique(fields, "keywords", msg.get("subject") or [])
+    extend_unique(fields.setdefault("keywords", []), msg.get("subject") or [])
     return "crossref" if fields["source"] == "input-only" else fields["source"]
 
 
@@ -538,8 +521,8 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
                 },
             )
         )
-        _extend_unique(fields, "fields_of_study", prefetched.fields_of_study)
-        _extend_unique(fields, "publication_types", prefetched.publication_types)
+        extend_unique(fields.setdefault("fields_of_study", []), prefetched.fields_of_study)
+        extend_unique(fields.setdefault("publication_types", []), prefetched.publication_types)
         if any(
             [
                 prefetched.title,
@@ -564,8 +547,8 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
                         },
                     )
                 )
-                _extend_unique(fields, "mesh_terms", fetched.get("mesh") or [])
-                _extend_unique(fields, "keywords", fetched.get("keywords") or [])
+                extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
+                extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
             except (requests.RequestException, ET.ParseError):
                 pass
 

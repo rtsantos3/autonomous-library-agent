@@ -20,7 +20,6 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RIS_PATH = PROJECT_ROOT / "data" / "endnote-extracted" / "PDF" / "2086963638" / "4690500citation.ris"

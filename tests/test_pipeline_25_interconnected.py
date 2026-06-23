@@ -4,7 +4,6 @@ Uses ingest_batch() for parallelized processing.
 Reports cross-links materialized.
 """
 import importlib.util
-import json
 import sys
 import time
 from datetime import date

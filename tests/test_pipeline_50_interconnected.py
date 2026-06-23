@@ -3,7 +3,6 @@ Integration test: 50 foundational interconnected microbiome papers (2005-2013).
 Uses ingest_batch() for parallelized processing.
 Reports cross-links materialized.
 """
-import json
 import sys
 import time
 from datetime import date
@@ -95,7 +94,7 @@ def run():
     queued_after = len(find_nodes(tag="pipeline:queued"))
 
     print(f"\n{'='*60}")
-    print(f"SUMMARY")
+    print("SUMMARY")
     print(f"{'='*60}")
     print(f"  Time elapsed:     {elapsed:.1f}s ({elapsed/len(DOIS):.1f}s per paper)")
     print(f"  Processed:        {len(ok)}/{len(DOIS)}")
@@ -108,7 +107,7 @@ def run():
     print(f"  Queued delta:     {queued_after - queued_before} (expect 0 — no stubs)")
 
     if failed:
-        print(f"\n  Failures:")
+        print("\n  Failures:")
         for o in failed:
             doi = o.parse.doi if o.parse else "?"
             print(f"    {doi}: {o.errors}")

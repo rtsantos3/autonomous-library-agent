@@ -2,9 +2,7 @@
 Integration test: run full ingestion pipeline on 20 queued nodes,
 then report interconnections materialized.
 """
-import json
 import sys
-import subprocess
 from datetime import date
 from pathlib import Path
 from dotenv import load_dotenv
@@ -94,7 +92,7 @@ def run():
     queued_after = count_queued()
 
     print(f"\n{'='*60}")
-    print(f"SUMMARY")
+    print("SUMMARY")
     print(f"{'='*60}")
     print(f"  Processed:        {len(results)}/{len(DOIS)}")
     print(f"  Failed:           {len(failed)}")
@@ -105,7 +103,7 @@ def run():
     print(f"  Queued before:    {queued_before}")
     print(f"  Queued after:     {queued_after}  (delta: {queued_after - queued_before}, should be 0 — no stubs)")
     if failed:
-        print(f"\n  Failed DOIs:")
+        print("\n  Failed DOIs:")
         for d in failed:
             print(f"    {d}")
 

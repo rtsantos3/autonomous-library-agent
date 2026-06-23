@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 
 import requests
 
+from pipeline._utils import extend_unique
 from pipeline._http import S2_LIMITER, http_post
 from pipeline.citations import CitationItem
 
@@ -16,13 +16,6 @@ S2_BATCH_FIELDS = (
     "paperId,title,abstract,year,venue,authors,externalIds,fieldsOfStudy,"
     "s2FieldsOfStudy,publicationTypes,references.externalIds,references.title,references.year"
 )
-
-
-def _slug(text):
-    if text is None:
-        return None
-    slug = re.sub(r"[^0-9a-z]+", "-", str(text).strip().lower()).strip("-")
-    return slug or None
 
 
 @dataclass
@@ -38,18 +31,6 @@ class BatchResolved:
     fields_of_study: list[str] = field(default_factory=list)
     publication_types: list[str] = field(default_factory=list)
     citations: list[CitationItem] = field(default_factory=list)
-
-
-def _extend_unique(values: list[str], incoming) -> list[str]:
-    seen = set(values)
-    for value in incoming or []:
-        if value in (None, "", []):
-            continue
-        text = str(value).strip()
-        if text and text not in seen:
-            values.append(text)
-            seen.add(text)
-    return values
 
 
 def _normalize_doi(value: Optional[str]) -> Optional[str]:
@@ -79,8 +60,8 @@ def _citation_from_reference(ref: dict) -> Optional[CitationItem]:
 def _build_resolved(entry: dict) -> BatchResolved:
     external_ids = entry.get("externalIds") or {}
     fields_of_study: list[str] = []
-    _extend_unique(fields_of_study, entry.get("fieldsOfStudy") or [])
-    _extend_unique(
+    extend_unique(fields_of_study, entry.get("fieldsOfStudy") or [])
+    extend_unique(
         fields_of_study,
         [item.get("category") for item in entry.get("s2FieldsOfStudy") or [] if isinstance(item, dict)],
     )
@@ -99,7 +80,7 @@ def _build_resolved(entry: dict) -> BatchResolved:
         venue=entry.get("venue"),
         authors=[a.get("name") for a in entry.get("authors") or [] if a.get("name")],
         fields_of_study=fields_of_study,
-        publication_types=_extend_unique([], entry.get("publicationTypes") or []),
+        publication_types=extend_unique([], entry.get("publicationTypes") or []),
         citations=citations,
     )
 
