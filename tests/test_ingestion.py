@@ -390,10 +390,6 @@ class TestIngestionUnit:
         assert result.citations[0].doi == "10.2/y"
         assert result.citations[0].pmid == "456"
 
-    @pytest.mark.xfail(
-        reason="resolve_identity currently keeps the input DOI because _merge_missing does not overwrite populated fields",
-        strict=True,
-    )
     def test_resolve_s2_canonical_doi_replaces_input_doi(self):
         parsed = ParseResult(None, "10.1/input", None, None, [], None, None)
         payload = {
@@ -540,10 +536,6 @@ class TestIngestionUnit:
             ingestion.upsert_node(resolved(authors=["A One", "B Two", "C Three"]), DedupResult(None, None))
         assert add.call_args.kwargs["citation"].startswith("A One; B Two; C Three (2024).")
 
-    @pytest.mark.xfail(
-        reason="_citation_string currently renders missing years as n.d. instead of omitting the year segment",
-        strict=True,
-    )
     def test_upsert_citation_string_missing_year_omits_year_segment(self):
         with patch("pipeline.ingestion.trellis.add_reference", return_value={"slug": "new"}) as add, patch(
             "pipeline.ingestion.trellis.annotate_node"
@@ -848,7 +840,11 @@ class TestIngestionIntegration:
         outcome = ingestion.ingest_reference_pipeline({"doi": "10.1038/s41564-023-01464-1"})
         assert outcome.errors == []
         assert outcome.upsert.created is False
-        assert outcome.upsert.slug == "akkermansia-muciniphila-exacerbates-food-allergy-in-fibre-deprived-mice"
+        # Dedup returns the node's UUID (unambiguous for downstream trellis ops);
+        # verify it resolves back to the expected canonical node rather than
+        # pinning the identifier form.
+        existing = ingestion.trellis.get_node(outcome.upsert.slug)
+        assert ingestion._node_slug(existing) == "akkermansia-muciniphila-exacerbates-food-allergy-in-fibre-deprived-mice"
 
     def test_no_stub_nodes_created_for_unresolved_citations(self, live_trellis):
         before = ingestion.trellis.find_nodes(tag="pipeline:queued")

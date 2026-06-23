@@ -166,6 +166,19 @@ def _merge_missing(existing: dict, incoming: dict) -> dict:
     return merged
 
 
+def _prefer_canonical_doi(fields: dict, candidate_doi: Optional[str]) -> None:
+    # S2 normalizes to the registered/canonical DOI. When it differs from the
+    # input DOI, promote the canonical one and retain the original as an alt so
+    # dedup still matches records ingested under the older identifier. Unlike
+    # _merge_missing this intentionally overwrites an already-populated DOI.
+    canonical = _bare_doi(candidate_doi)
+    if not canonical or canonical == fields.get("doi"):
+        return
+    if fields.get("doi"):
+        extend_unique(fields.setdefault("alt_dois", []), [fields["doi"]])
+    fields["doi"] = canonical
+
+
 def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) -> list[str]:
     tags = [t for t in (existing_tags or []) if not str(t).startswith("pipeline:")]
     tags.append("pipeline:scaffolded")
@@ -217,12 +230,15 @@ def _reference_metadata(resolved: ResolveResult) -> dict:
 
 def _citation_string(resolved: ResolveResult) -> str:
     authors = "; ".join(resolved.authors or [])
-    year = resolved.year or "n.d."
     parts = []
-    if authors:
-        parts.append(f"{authors} ({year}).")
-    else:
-        parts.append(f"({year}).")
+    # Omit the year segment entirely when the year is unknown rather than
+    # emitting a placeholder like "(n.d.)".
+    if resolved.year and authors:
+        parts.append(f"{authors} ({resolved.year}).")
+    elif resolved.year:
+        parts.append(f"({resolved.year}).")
+    elif authors:
+        parts.append(f"{authors}.")
     parts.append(resolved.title)
     if resolved.venue:
         parts.append(resolved.venue)
@@ -450,6 +466,7 @@ def _fill_from_s2(fields: dict) -> str:
             },
         )
     )
+    _prefer_canonical_doi(fields, external_ids.get("DOI"))
     extend_unique(fields.setdefault("fields_of_study", []), payload.get("fieldsOfStudy") or [])
     extend_unique(
         fields.setdefault("fields_of_study", []),
@@ -562,6 +579,7 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
                 },
             )
         )
+        _prefer_canonical_doi(fields, prefetched.doi)
         extend_unique(fields.setdefault("fields_of_study", []), prefetched.fields_of_study)
         extend_unique(fields.setdefault("publication_types", []), prefetched.publication_types)
         if any(
