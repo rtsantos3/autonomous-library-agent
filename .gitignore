@@ -8,8 +8,13 @@ vault/
 # Conda environment
 setup/
 
-# Trellis workspace data store (created in-repo when TRELLIS_WORKSPACE points here)
-.trellis/
+# Trellis workspace — the graph DB IS tracked so the network topology is shared
+# via git. Only the transient SQLite sidecar files are ignored: they are runtime
+# WAL/lock artifacts, not durable data. Checkpoint the WAL into trellis.db before
+# committing (e.g. `sqlite3 .trellis/trellis.db 'PRAGMA wal_checkpoint(TRUNCATE);'`)
+# so the committed db is complete.
+.trellis/*.db-wal
+.trellis/*.db-shm
 
 # Python
 __pycache__/
