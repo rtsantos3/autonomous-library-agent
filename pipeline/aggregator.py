@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Optional
@@ -16,6 +17,7 @@ S2_BATCH_FIELDS = (
     "paperId,title,abstract,year,venue,authors,externalIds,fieldsOfStudy,"
     "s2FieldsOfStudy,publicationTypes,references.externalIds,references.title,references.year"
 )
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -106,9 +108,13 @@ def batch_resolve(dois: list[str], chunk_size: int = 500) -> dict[str, BatchReso
     if api_key:
         headers["x-api-key"] = api_key
 
+    chunks_attempted = 0
+    chunks_failed = 0
+
     # One gated S2 batch call replaces N resolve+fetch calls, avoiding the
     # roughly 1/s S2 rate gate on per-paper lookups.
     for offset in range(0, len(normalized), chunk_size):
+        chunks_attempted += 1
         chunk = normalized[offset : offset + chunk_size]
         chunk_ids = [f"DOI:{doi}" for _key, doi in chunk]
         try:
@@ -121,12 +127,38 @@ def batch_resolve(dois: list[str], chunk_size: int = 500) -> dict[str, BatchReso
                 timeout=30,
             )
             payload = resp.json()
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            chunks_failed += 1
+            logger.warning("s2 batch_resolve chunk offset %s request failed: %s", offset, exc)
             continue
-        except ValueError:
+        except ValueError as exc:
+            chunks_failed += 1
+            logger.warning("s2 batch_resolve chunk offset %s json decode failed: %s", offset, exc)
             continue
 
-        for (input_key, _doi), entry in zip(chunk, payload or []):
+        if isinstance(payload, list):
+            entries = payload
+        elif isinstance(payload, dict):
+            entries = payload.get("data")
+            if not isinstance(entries, list):
+                chunks_failed += 1
+                logger.warning(
+                    "s2 batch_resolve chunk offset %s returned unusable dict payload",
+                    offset,
+                )
+                continue
+        else:
+            chunks_failed += 1
+            logger.warning(
+                "s2 batch_resolve chunk offset %s returned unusable payload type %s",
+                offset,
+                type(payload).__name__,
+            )
+            continue
+
+        # S2's batch endpoint is normally a top-level list aligned to input ids;
+        # wrapped/non-list payload handling is defensive so entries are never mis-associated.
+        for (input_key, _doi), entry in zip(chunk, entries or []):
             if not entry:
                 continue
             resolved = _build_resolved(entry)
@@ -134,4 +166,12 @@ def batch_resolve(dois: list[str], chunk_size: int = 500) -> dict[str, BatchReso
             if resolved.doi:
                 result[resolved.doi.lower()] = resolved
 
+    resolved_input_keys = {key for key, _doi in normalized if key in result}
+    logger.info(
+        "s2 batch_resolve summary: input_dois=%s resolved=%s chunks_attempted=%s chunks_failed=%s",
+        len(normalized),
+        len(resolved_input_keys),
+        chunks_attempted,
+        chunks_failed,
+    )
     return result

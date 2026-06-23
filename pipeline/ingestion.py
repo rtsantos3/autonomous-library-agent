@@ -552,7 +552,18 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
             except (requests.RequestException, ET.ParseError):
                 pass
 
-    if not has_sufficient_title_only_metadata and (prefetched is None or not _blank_to_none(fields.get("title"))):
+    needs_enrichment = any(
+        [
+            not _blank_to_none(fields.get("s2_id")),
+            not fields.get("authors"),
+            not fields.get("year"),
+            not _blank_to_none(fields.get("venue")),
+            not _blank_to_none(fields.get("abstract")),
+        ]
+    )
+    if not has_sufficient_title_only_metadata and (
+        prefetched is None or not _blank_to_none(fields.get("title")) or needs_enrichment
+    ):
         fields["source"] = _fill_from_pubmed(parsed, fields)
         fields["source"] = _fill_from_s2(fields)
         if not _blank_to_none(fields.get("title")):
