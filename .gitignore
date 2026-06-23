@@ -1,0 +1,25 @@
+# Secrets
+.env
+
+# Local library data — never committed
+data/
+vault/
+
+# Conda environment
+setup/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# One-off scripts
+screenshot*.py
+scaffold_5.py
+preview_papers.py
+diag.py
+
+# Editor
+.DS_Store
+*.swp
