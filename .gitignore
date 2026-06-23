@@ -8,13 +8,14 @@ vault/
 # Conda environment
 setup/
 
-# Trellis workspace — the graph DB IS tracked so the network topology is shared
-# via git. Only the transient SQLite sidecar files are ignored: they are runtime
-# WAL/lock artifacts, not durable data. Checkpoint the WAL into trellis.db before
-# committing (e.g. `sqlite3 .trellis/trellis.db 'PRAGMA wal_checkpoint(TRUNCATE);'`)
-# so the committed db is complete.
-.trellis/*.db-wal
-.trellis/*.db-shm
+# Trellis workspace. The SQLite db (trellis.db + WAL/SHM) is regenerable local
+# runtime state and is NEVER committed. The durable, shareable artifact is the
+# JSONL export at graph/trellis_export.jsonl — produced by scripts/export_graph.sh
+# and rebuilt on clone via `trellis import` (see setup.sh). config.yml / README.md
+# inside .trellis/ stay tracked as small workspace metadata.
+.trellis/trellis.db
+.trellis/trellis.db-wal
+.trellis/trellis.db-shm
 
 # Python
 __pycache__/

@@ -69,11 +69,18 @@ say "Resolving Trellis workspace"
 WS="$(grep -E '^TRELLIS_WORKSPACE=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
 WS="${WS:-$REPO_ROOT}"
 ok "workspace: $WS"
+GRAPH_EXPORT="$REPO_ROOT/graph/trellis_export.jsonl"
 if [ -d "$WS/.trellis" ]; then
-  ok "workspace is initialized (.trellis/ present)"
+  ok "workspace already initialized (.trellis/ present) — leaving it untouched"
+elif [ -f "$GRAPH_EXPORT" ]; then
+  # Hydrate the local SQLite db from the committed JSONL topology. SQLite is
+  # regenerable; the JSONL export is the shared source of truth.
+  say "Hydrating graph from $GRAPH_EXPORT"
+  ( cd "$WS" && { trellis init >/dev/null 2>&1 || true; } && trellis import --path "$GRAPH_EXPORT" )
+  ok "imported graph topology into $WS/.trellis"
 else
-  warn "no .trellis/ at $WS yet — Trellis instantiates a workspace in the directory it runs in,"
-  warn "so it is created automatically on the first ingestion run (cwd = workspace)."
+  warn "no workspace and no graph export yet — an empty workspace is created on first use."
+  warn "once you have a graph, snapshot it with scripts/export_graph.sh and commit graph/trellis_export.jsonl."
 fi
 
 # 6. smoke test (offline only) -------------------------------------------------
@@ -91,4 +98,7 @@ Next steps:
        python -c "from pipeline.ingestion import ingest_batch; \\
 dois=[l.strip() for l in open('samples/seed_dois.txt') if l.strip() and not l.startswith('#')]; \\
 o,m=ingest_batch(dois); print(len(o),'ingested')"
+  4. To share the resulting graph topology via git:
+       ./scripts/export_graph.sh        # writes graph/trellis_export.jsonl
+       git add graph/trellis_export.jsonl && git commit -m "Update graph topology"
 EOF
