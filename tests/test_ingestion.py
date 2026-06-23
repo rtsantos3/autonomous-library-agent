@@ -11,6 +11,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline import ingestion
+from pipeline.aggregator import BatchResolved
 from pipeline.citations import CitationItem, CitationResult, fetch_outbound_citations
 from pipeline.ingestion import (
     DedupResult,
@@ -164,6 +165,20 @@ class TestIngestionUnit:
         with pytest.raises(ValueError):
             ingestion.parse_input({"title": "123456789"})
 
+    def test__make_tags_emits_topical_tags(self):
+        tags = ingestion._make_tags(
+            resolved(
+                fields_of_study=["Biology"],
+                publication_types=["Review"],
+                mesh_terms=["Gastrointestinal Microbiome"],
+                keywords=["16S rRNA"],
+            )
+        )
+        assert "field:biology" in tags
+        assert "type:review" in tags
+        assert "mesh:gastrointestinal-microbiome" in tags
+        assert "kw:16s-rrna" in tags
+
     # resolve_identity
     def test_resolve_doi_input_attempts_s2_when_title_present(self):
         parsed = ParseResult("Title", "10.1/x", None, None, ["Author"], None, None)
@@ -253,6 +268,71 @@ class TestIngestionUnit:
         assert result.source == "semantic-scholar"
         assert result.authors == ["Author A"]
         assert result.s2_id == "s2-complete-doi"
+
+    def test_resolve_with_prefetched_seeds_from_batch_and_skips_esearch(self):
+        parsed = ParseResult(None, "10.1/x", None, None, [], None, None)
+        prefetched = BatchResolved(
+            doi="10.1/x",
+            s2_id="s2-batch-1",
+            title="Batch title",
+            abstract="Batch abstract",
+            pmid="123",
+            year="2024",
+            venue="Batch Journal",
+            authors=["Author A"],
+            fields_of_study=["Biology"],
+            publication_types=["Review"],
+            citations=[CitationItem("10.2/y", None, None, "Target", 2020)],
+        )
+        with patch(
+            "pipeline.ingestion._pubmed_fetch",
+            return_value={"abstract": None, "pmid": "123", "mesh": ["X"], "keywords": []},
+        ), patch("pipeline.ingestion._pubmed_search") as search:
+            result = ingestion.resolve_identity(parsed, prefetched=prefetched)
+        search.assert_not_called()
+        assert result.title == "Batch title"
+        assert result.source == "s2-batch"
+        assert result.s2_id == "s2-batch-1"
+        assert result.mesh_terms == ["X"]
+
+    def test_batch_resolve_builds_map(self):
+        from pipeline.aggregator import batch_resolve
+
+        payload = [
+            {
+                "paperId": "s2-1",
+                "title": "Batch title",
+                "abstract": "Abstract",
+                "year": 2024,
+                "venue": "Journal",
+                "authors": [{"name": "Author A"}],
+                "externalIds": {"DOI": "10.1/X", "PubMed": "123"},
+                "fieldsOfStudy": ["Biology"],
+                "s2FieldsOfStudy": [{"category": "Medicine", "source": "s2"}],
+                "publicationTypes": ["Review"],
+                "references": [
+                    {
+                        "externalIds": {"DOI": "10.2/Y", "PubMed": "456"},
+                        "title": "Reference title",
+                        "year": 2020,
+                    },
+                    {"externalIds": {}, "title": "", "year": 2021},
+                ],
+            },
+            None,
+        ]
+        with patch("pipeline.aggregator.http_post", return_value=Response(payload)) as post:
+            resolved_map = batch_resolve(["10.1/x", "10.missing/y"])
+        post.assert_called_once()
+        assert "10.1/x" in resolved_map
+        assert "10.missing/y" not in resolved_map
+        result = resolved_map["10.1/x"]
+        assert result.s2_id == "s2-1"
+        assert result.fields_of_study == ["Biology", "Medicine"]
+        assert result.publication_types == ["Review"]
+        assert len(result.citations) == 1
+        assert result.citations[0].doi == "10.2/y"
+        assert result.citations[0].pmid == "456"
 
     @pytest.mark.xfail(
         reason="resolve_identity currently keeps the input DOI because _merge_missing does not overwrite populated fields",

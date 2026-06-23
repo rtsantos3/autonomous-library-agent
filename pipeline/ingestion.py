@@ -19,6 +19,7 @@ import dataclasses
 import concurrent.futures
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -72,6 +73,10 @@ class ResolveResult:
     venue: Optional[str]
     alt_dois: list[str]
     source: str
+    fields_of_study: list[str] = field(default_factory=list)
+    publication_types: list[str] = field(default_factory=list)
+    mesh_terms: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -156,6 +161,25 @@ def _merge_missing(existing: dict, incoming: dict) -> dict:
     return merged
 
 
+def _extend_unique(fields: dict, key: str, values) -> None:
+    current = fields.setdefault(key, [])
+    seen = set(current)
+    for value in values or []:
+        if value in (None, "", []):
+            continue
+        text = str(value).strip()
+        if text and text not in seen:
+            current.append(text)
+            seen.add(text)
+
+
+def _slug(text):
+    if text is None:
+        return None
+    slug = re.sub(r"[^0-9a-z]+", "-", str(text).strip().lower()).strip("-")
+    return slug or None
+
+
 def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) -> list[str]:
     tags = [t for t in (existing_tags or []) if not str(t).startswith("pipeline:")]
     tags.append("pipeline:scaffolded")
@@ -165,6 +189,22 @@ def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) ->
         tags.append(f"pmid:{resolved.pmid}")
     if resolved.year:
         tags.append(f"year:{resolved.year}")
+    for value in resolved.fields_of_study:
+        slug = _slug(value)
+        if slug:
+            tags.append(f"field:{slug}")
+    for value in resolved.publication_types:
+        slug = _slug(value)
+        if slug:
+            tags.append(f"type:{slug}")
+    for value in resolved.mesh_terms:
+        slug = _slug(value)
+        if slug:
+            tags.append(f"mesh:{slug}")
+    for value in resolved.keywords:
+        slug = _slug(value)
+        if slug:
+            tags.append(f"kw:{slug}")
     return list(dict.fromkeys(tags))
 
 
@@ -292,6 +332,17 @@ def _pubmed_fetch(pmid: str) -> dict:
     if not fetched_pmid:
         fetched_pmid = _element_text(root.find(".//PMID"))
 
+    mesh = [
+        text
+        for text in (_element_text(element) for element in root.findall(".//MeshHeading/DescriptorName"))
+        if text
+    ]
+    keywords = [
+        text
+        for text in (_element_text(element) for element in root.findall(".//KeywordList/Keyword"))
+        if text
+    ]
+
     return {
         "title": _element_text(root.find(".//ArticleTitle")),
         "abstract": " ".join(abstract_parts) or None,
@@ -300,6 +351,8 @@ def _pubmed_fetch(pmid: str) -> dict:
         "venue": _element_text(root.find(".//Journal/Title")) or _element_text(root.find(".//ISOAbbreviation")),
         "doi": doi,
         "pmid": fetched_pmid or pmid,
+        "mesh": mesh,
+        "keywords": keywords,
     }
 
 
@@ -323,6 +376,8 @@ def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
                 },
             )
         )
+        _extend_unique(fields, "mesh_terms", fetched.get("mesh") or [])
+        _extend_unique(fields, "keywords", fetched.get("keywords") or [])
         return "pubmed"
     except (requests.RequestException, ET.ParseError):
         return fields["source"]
@@ -339,7 +394,12 @@ def _fill_from_s2(fields: dict) -> str:
     try:
         response = http_get(
             f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}",
-            params={"fields": "paperId,title,abstract,authors,year,venue,externalIds"},
+            params={
+                "fields": (
+                    "paperId,title,abstract,authors,year,venue,externalIds,"
+                    "fieldsOfStudy,s2FieldsOfStudy,publicationTypes"
+                )
+            },
             headers=headers,
             limiter=S2_LIMITER,
             timeout=30,
@@ -367,6 +427,13 @@ def _fill_from_s2(fields: dict) -> str:
             },
         )
     )
+    _extend_unique(fields, "fields_of_study", payload.get("fieldsOfStudy") or [])
+    _extend_unique(
+        fields,
+        "fields_of_study",
+        [item.get("category") for item in payload.get("s2FieldsOfStudy") or [] if isinstance(item, dict)],
+    )
+    _extend_unique(fields, "publication_types", payload.get("publicationTypes") or [])
     return "semantic-scholar" if fields["source"] == "input-only" else fields["source"]
 
 
@@ -424,10 +491,11 @@ def _fill_from_crossref(fields: dict) -> str:
             },
         )
     )
+    _extend_unique(fields, "keywords", msg.get("subject") or [])
     return "crossref" if fields["source"] == "input-only" else fields["source"]
 
 
-def resolve_identity(parsed: ParseResult) -> ResolveResult:
+def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" = None) -> ResolveResult:
     fields = {
         "title": parsed.title,
         "doi": parsed.doi,
@@ -439,6 +507,10 @@ def resolve_identity(parsed: ParseResult) -> ResolveResult:
         "venue": parsed.venue,
         "alt_dois": [],
         "source": "input-only",
+        "fields_of_study": [],
+        "publication_types": [],
+        "mesh_terms": [],
+        "keywords": [],
     }
     has_sufficient_title_only_metadata = (
         parsed.title
@@ -449,7 +521,55 @@ def resolve_identity(parsed: ParseResult) -> ResolveResult:
         and parsed.year
         and parsed.venue
     )
-    if not has_sufficient_title_only_metadata:
+
+    if prefetched is not None:
+        fields.update(
+            _merge_missing(
+                fields,
+                {
+                    "title": prefetched.title,
+                    "doi": prefetched.doi,
+                    "pmid": prefetched.pmid,
+                    "s2_id": prefetched.s2_id,
+                    "abstract": prefetched.abstract,
+                    "authors": prefetched.authors,
+                    "year": prefetched.year,
+                    "venue": prefetched.venue,
+                },
+            )
+        )
+        _extend_unique(fields, "fields_of_study", prefetched.fields_of_study)
+        _extend_unique(fields, "publication_types", prefetched.publication_types)
+        if any(
+            [
+                prefetched.title,
+                prefetched.doi,
+                prefetched.pmid,
+                prefetched.s2_id,
+                prefetched.abstract,
+            ]
+        ):
+            fields["source"] = "s2-batch"
+
+        pmid = prefetched.pmid or fields.get("pmid")
+        if pmid:
+            try:
+                fetched = _pubmed_fetch(pmid)
+                fields.update(
+                    _merge_missing(
+                        fields,
+                        {
+                            "abstract": fetched.get("abstract"),
+                            "pmid": fetched.get("pmid") or pmid,
+                        },
+                    )
+                )
+                _extend_unique(fields, "mesh_terms", fetched.get("mesh") or [])
+                _extend_unique(fields, "keywords", fetched.get("keywords") or [])
+            except (requests.RequestException, ET.ParseError):
+                pass
+
+    if not has_sufficient_title_only_metadata and (prefetched is None or not _blank_to_none(fields.get("title"))):
         fields["source"] = _fill_from_pubmed(parsed, fields)
         fields["source"] = _fill_from_s2(fields)
         if not _blank_to_none(fields.get("title")):
@@ -470,6 +590,10 @@ def resolve_identity(parsed: ParseResult) -> ResolveResult:
         venue=_blank_to_none(fields.get("venue")),
         alt_dois=fields.get("alt_dois") or [],
         source=fields["source"],
+        fields_of_study=fields.get("fields_of_study") or [],
+        publication_types=fields.get("publication_types") or [],
+        mesh_terms=fields.get("mesh_terms") or [],
+        keywords=fields.get("keywords") or [],
     )
 
 
@@ -614,14 +738,21 @@ def verify_outcome(slug: str) -> VerifyResult:
         )
 
 
-def ingest_reference_pipeline(raw: dict) -> IngestionOutcome:
+def ingest_reference_pipeline(raw: dict, prefetched=None) -> IngestionOutcome:
     outcome = IngestionOutcome()
     try:
         outcome.parse = parse_input(raw)
-        outcome.resolve = resolve_identity(outcome.parse)
+        outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched)
         outcome.dedup = find_existing(outcome.resolve)
         outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
-        citations = fetch_outbound_citations(outcome.resolve.doi or "")
+        if prefetched is not None and prefetched.citations:
+            citations = CitationResult(
+                source="s2-batch",
+                retrieved_at=date.today().isoformat(),
+                items=prefetched.citations,
+            )
+        else:
+            citations = fetch_outbound_citations(outcome.resolve.doi or "")
         outcome.citation_store = store_citations(outcome.upsert.slug, citations)
         index = trellis.build_node_index()
         outcome.link = link_citations(outcome.upsert.slug, citations, index=index)
@@ -661,6 +792,17 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
             )
         )
 
+    from pipeline.aggregator import batch_resolve
+
+    t0 = time.perf_counter()
+    resolved_map = batch_resolve(dois)
+    elapsed = time.perf_counter() - t0
+    add_phase("phase0 batch resolve", elapsed, len(dois))
+
+    def prefetched_for_doi(doi: str):
+        key = _bare_doi(doi)
+        return resolved_map.get(key.lower()) if key else None
+
     t0 = time.perf_counter()
     index = trellis.build_node_index()
     elapsed = time.perf_counter() - t0
@@ -678,7 +820,7 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
         try:
             outcome.parse = parse_input({"doi": doi})
             t0 = time.perf_counter()
-            outcome.resolve = resolve_identity(outcome.parse)
+            outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched_for_doi(doi))
             resolve_elapsed = time.perf_counter() - t0
             outcome.dedup = find_existing(outcome.resolve)
             t0 = time.perf_counter()
@@ -727,7 +869,15 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
         idx, doi, slug = item
         outcome = outcomes[idx]
         try:
-            citations = fetch_outbound_citations(doi)
+            prefetched = prefetched_for_doi(dois[idx])
+            if prefetched is not None and prefetched.citations:
+                citations = CitationResult(
+                    source="s2-batch",
+                    retrieved_at=date.today().isoformat(),
+                    items=prefetched.citations,
+                )
+            else:
+                citations = fetch_outbound_citations(doi)
             outcome.citation_store = store_citations(slug, citations)
             return idx, slug, citations
         except Exception as e:
