@@ -80,7 +80,6 @@ class ResolveResult:
     publication_types: list[str] = field(default_factory=list)
     mesh_terms: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
-    chemicals: list[str] = field(default_factory=list)
     mesh_major: list[str] = field(default_factory=list)
     mesh_qualifiers: list[str] = field(default_factory=list)
 
@@ -192,10 +191,6 @@ def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) ->
         slug = slugify(value)
         if slug:
             tags.append(f"kw:{slug}")
-    for value in resolved.chemicals:
-        slug = slugify(value)
-        if slug:
-            tags.append(f"chem:{slug}")
     for value in resolved.mesh_major:
         slug = slugify(value)
         if slug:
@@ -341,11 +336,6 @@ def _pubmed_fetch(pmid: str) -> dict:
         for text in (_element_text(element) for element in root.findall(".//KeywordList/Keyword"))
         if text
     ]
-    chemicals = [
-        text
-        for text in (_element_text(element) for element in root.findall(".//ChemicalList/Chemical/NameOfSubstance"))
-        if text
-    ]
     mesh_major = []
     # PubMed marks major topics on either the descriptor itself or a qualifier
     # inside the same MeshHeading, so inspect each heading instead of only the
@@ -380,7 +370,6 @@ def _pubmed_fetch(pmid: str) -> dict:
         "pmid": fetched_pmid or pmid,
         "mesh": mesh,
         "keywords": keywords,
-        "chemicals": extend_unique([], chemicals),
         "mesh_major": extend_unique([], mesh_major),
         "mesh_qualifiers": extend_unique([], mesh_qualifiers),
         "publication_types": extend_unique([], publication_types),
@@ -409,7 +398,6 @@ def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
         )
         extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
         extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
-        extend_unique(fields.setdefault("chemicals", []), fetched.get("chemicals") or [])
         extend_unique(fields.setdefault("mesh_major", []), fetched.get("mesh_major") or [])
         extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
         extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
@@ -545,7 +533,6 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
         "publication_types": [],
         "mesh_terms": [],
         "keywords": [],
-        "chemicals": [],
         "mesh_major": [],
         "mesh_qualifiers": [],
     }
@@ -603,7 +590,6 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
                 )
                 extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
                 extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
-                extend_unique(fields.setdefault("chemicals", []), fetched.get("chemicals") or [])
                 extend_unique(fields.setdefault("mesh_major", []), fetched.get("mesh_major") or [])
                 extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
                 extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
@@ -646,7 +632,6 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
         publication_types=fields.get("publication_types") or [],
         mesh_terms=fields.get("mesh_terms") or [],
         keywords=fields.get("keywords") or [],
-        chemicals=fields.get("chemicals") or [],
         mesh_major=fields.get("mesh_major") or [],
         mesh_qualifiers=fields.get("mesh_qualifiers") or [],
     )
