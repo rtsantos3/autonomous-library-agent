@@ -1,0 +1,247 @@
+import json
+import sys
+from pathlib import Path
+from unittest.mock import call, patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from pipeline import trellis
+
+
+UUID_SOURCE = "11111111-1111-1111-1111-111111111111"
+UUID_TARGET = "22222222-2222-2222-2222-222222222222"
+UUID_SELF = "33333333-3333-3333-3333-333333333333"
+
+
+def test_norm_title_normalizes_unicode_whitespace_case_and_trailing_periods():
+    assert trellis._norm_title("  The Café\tMicrobiome\nStudy...  ") == "the cafe microbiome study"
+
+
+def test_normalize_doi_uri_accepts_common_prefixes_and_preserves_doi_case():
+    assert trellis._normalize_doi_uri("doi:10.1000/ABC ") == "https://doi.org/10.1000/ABC"
+    assert trellis._normalize_doi_uri("http://dx.doi.org/10.2000/X") == "https://doi.org/10.2000/X"
+    assert trellis._normalize_doi_uri("https://doi.org/10.3000/Y") == "https://doi.org/10.3000/Y"
+
+
+def test_doi_key_returns_bare_lowercase_doi_or_none():
+    assert trellis._doi_key(" DOI:10.1000/ABC ") == "10.1000/abc"
+    assert trellis._doi_key("") is None
+
+
+def test_unwrap_node_and_list_accept_trellis_response_shapes():
+    node = {"slug": "paper"}
+    assert trellis._unwrap_node({"node": node}) == node
+    assert trellis._unwrap_node(node) == node
+    assert trellis._unwrap_node(None) == {}
+
+    nodes = [{"slug": "one"}, {"slug": "two"}]
+    assert trellis._unwrap_list(nodes) == nodes
+    assert trellis._unwrap_list({"results": nodes}) == nodes
+    assert trellis._unwrap_list({"nodes": nodes}) == nodes
+    assert trellis._unwrap_list(None) == []
+
+
+def test_node_identifier_prefers_id_then_uuid_then_slug():
+    assert trellis._node_identifier({"id": "id", "uuid": "uuid", "slug": "slug"}) == "id"
+    assert trellis._node_identifier({"uuid": "uuid", "slug": "slug"}) == "uuid"
+    assert trellis._node_identifier({"slug": "slug"}) == "slug"
+    assert trellis._node_identifier({}) is None
+
+
+def test_build_node_index_indexes_identifiers_titles_alt_dois_and_pending_citations():
+    source = {
+        "id": UUID_SOURCE,
+        "slug": "source-paper",
+        "title": "  Source Café Paper. ",
+        "uri": "https://doi.org/10.1/SOURCE",
+        "tags": "pipeline:scaffolded,s2id:s2-source,pmid:123",
+        "metadata": {
+            "reference": {
+                "uri": "doi:10.1/source-meta",
+                "doi": "10.1/source-reference",
+                "alt_dois": ["10.1/ALT-A", "https://doi.org/10.1/alt-b"],
+                "outbound_citations": {
+                    "items": [
+                        {"doi": "10.9/PENDING"},
+                        {"doi": ""},
+                        "not-a-dict",
+                    ]
+                },
+            }
+        },
+    }
+    other = {
+        "slug": "other-paper",
+        "title": "Other microbiome paper",
+        "tags": ["s2id:s2-other", "pmid:456"],
+        "metadata": {"reference": {"doi": "doi:10.2/OTHER"}},
+    }
+
+    with patch("pipeline.trellis.find_nodes", return_value=[source, other]) as find:
+        index = trellis.build_node_index()
+
+    find.assert_called_once_with(limit=5000)
+    assert index["by_doi"]["10.1/source"] == source
+    assert index["by_doi"]["10.1/source-meta"] == source
+    assert index["by_doi"]["10.1/source-reference"] == source
+    assert index["by_doi"]["10.1/alt-a"] == source
+    assert index["by_doi"]["10.1/alt-b"] == source
+    assert index["by_doi"]["10.2/other"] == other
+    assert index["by_s2id"]["s2-source"] == source
+    assert index["by_s2id"]["s2-other"] == other
+    assert index["by_pmid"]["123"] == source
+    assert index["by_pmid"]["456"] == other
+    assert index["by_title"]["source cafe paper"] == source
+    assert index["pending_citations"]["10.9/pending"] == [(UUID_SOURCE, source)]
+
+
+def test_dedup_check_indexed_match_precedence_and_misses():
+    by_s2id = {"slug": "s2"}
+    by_doi = {"slug": "doi"}
+    by_pmid = {"slug": "pmid"}
+    by_title = {"slug": "title"}
+    index = {
+        "by_s2id": {"s2": by_s2id},
+        "by_doi": {"10.1/x": by_doi},
+        "by_pmid": {"123": by_pmid},
+        "by_title": {"title based microbiome paper": by_title},
+    }
+
+    assert trellis.dedup_check_indexed(index, s2id="s2", doi="10.1/x", pmid="123") == by_s2id
+    assert trellis.dedup_check_indexed(index, doi="https://doi.org/10.1/X", pmid="123") == by_doi
+    assert trellis.dedup_check_indexed(index, pmid=123, title="Title Based Microbiome Paper") == by_pmid
+    assert trellis.dedup_check_indexed(index, title="Title Based Microbiome Paper.") == by_title
+    assert trellis.dedup_check_indexed(index, title="too short") is None
+    assert trellis.dedup_check_indexed(index, s2id="missing", doi="10.9/missing", pmid="999") is None
+
+
+def test_find_by_s2id_and_pmid_return_first_tag_match_from_chokepoint():
+    calls = []
+
+    def fake_run(*args):
+        calls.append(args)
+        if args == ("find", "--tag", "s2id:s2-1", "--json"):
+            return json.dumps([{"slug": "s2-match"}])
+        if args == ("find", "--tag", "pmid:123", "--json"):
+            return json.dumps({"results": [{"slug": "pmid-match"}]})
+        raise AssertionError(args)
+
+    with patch("pipeline.trellis._run", side_effect=fake_run):
+        assert trellis.find_by_s2id("s2-1") == {"slug": "s2-match"}
+        assert trellis.find_by_pmid("123") == {"slug": "pmid-match"}
+
+    assert calls == [
+        ("find", "--tag", "s2id:s2-1", "--json"),
+        ("find", "--tag", "pmid:123", "--json"),
+    ]
+
+
+def test_find_by_doi_checks_uri_metadata_doi_and_grep_alt_dois_from_chokepoint():
+    metadata_match = {
+        "slug": "metadata-match",
+        "metadata": {"reference": {"doi": "10.1/X"}},
+    }
+    alt_match = {"slug": "alt-match"}
+
+    def fake_run(*args):
+        if args == ("find", "--text", "https://doi.org/10.1/X", "--json"):
+            return json.dumps([{"slug": "wrong", "uri": "https://doi.org/10.other/x"}])
+        if args == ("find", "--text", "10.1/x", "--json"):
+            return json.dumps([metadata_match])
+        if args == ("find", "--text", "https://doi.org/10.9/ALT", "--json"):
+            return json.dumps([])
+        if args == ("find", "--text", "10.9/alt", "--json"):
+            return json.dumps([])
+        if args == ("grep", "10.9/ALT", "--json"):
+            return json.dumps([alt_match])
+        raise AssertionError(args)
+
+    with patch("pipeline.trellis._run", side_effect=fake_run):
+        assert trellis.find_by_doi("10.1/X") == metadata_match
+        assert trellis.find_by_doi("10.9/ALT") == alt_match
+
+
+def test_find_by_title_normalizes_query_and_requires_exact_normalized_match():
+    def fake_run(*args):
+        assert args == ("find", "--text", "microbiome cafe study", "--json")
+        return json.dumps(
+            [
+                {"slug": "near", "title": "Microbiome cafe studies"},
+                {"slug": "match", "title": "Microbiome Café Study."},
+            ]
+        )
+
+    with patch("pipeline.trellis._run", side_effect=fake_run):
+        assert trellis.find_by_title("  Microbiome Café Study... ") == {
+            "slug": "match",
+            "title": "Microbiome Café Study.",
+        }
+
+    with patch("pipeline.trellis._run", side_effect=AssertionError):
+        assert trellis.find_by_title("short") is None
+
+
+def test_reverse_materialize_links_waiting_sources_for_matching_pending_doi():
+    index = {
+        "pending_citations": {
+            "10.9/target": [
+                (UUID_SOURCE, {"slug": "source-paper"}),
+                (UUID_TARGET, {"slug": "self-paper"}),
+                (None, {"slug": "bad-paper"}),
+            ]
+        }
+    }
+
+    with patch("pipeline.trellis._run", return_value=json.dumps({"ok": True})) as run:
+        created = trellis.reverse_materialize(UUID_TARGET, doi="https://doi.org/10.9/TARGET", index=index)
+
+    assert created == 1
+    run.assert_called_once_with(
+        "link",
+        "--source-uuid",
+        UUID_SOURCE,
+        "--target-uuid",
+        UUID_TARGET,
+        "--relationship",
+        "references",
+        "--actor-id",
+        trellis.ACTOR,
+        "--json",
+    )
+
+
+def test_reverse_materialize_returns_zero_without_index_or_valid_doi():
+    with patch("pipeline.trellis._run", side_effect=AssertionError):
+        assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index=None) == 0
+        assert trellis.reverse_materialize(UUID_TARGET, doi="", index={"pending_citations": {}}) == 0
+        assert trellis.reverse_materialize("", doi="10.1/x", index={"pending_citations": {}}) == 0
+
+
+def test_set_pipeline_status_rejects_unknown_status_before_subprocess():
+    with patch("pipeline.trellis._run", side_effect=AssertionError):
+        with pytest.raises(ValueError, match="Unknown pipeline status"):
+            trellis.set_pipeline_status("paper", "unknown")
+
+
+def test_link_nodes_treats_duplicate_errors_as_idempotent():
+    with patch("pipeline.trellis._run", side_effect=RuntimeError("already exists")) as run:
+        assert trellis.link_nodes(UUID_SOURCE, UUID_TARGET, "references") == {"ok": True, "idempotent": True}
+
+    run.assert_has_calls(
+        [
+            call(
+                "link",
+                "--source-uuid",
+                UUID_SOURCE,
+                "--target-uuid",
+                UUID_TARGET,
+                "--relationship",
+                "references",
+                "--actor-id",
+                trellis.ACTOR,
+                "--json",
+            )
+        ]
+    )
