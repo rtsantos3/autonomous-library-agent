@@ -8,6 +8,9 @@ vault/
 # Conda environment
 setup/
 
+# Trellis workspace data store (created in-repo when TRELLIS_WORKSPACE points here)
+.trellis/
+
 # Python
 __pycache__/
 *.pyc

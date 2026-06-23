@@ -1,0 +1,13 @@
+# Sample microbiome-literature DOIs to exercise the ingestion pipeline on a
+# fresh clone. These are interconnected (they cite one another), so a batch
+# ingest produces real intra-batch citation edges to inspect in Trellis.
+#
+# Lines starting with '#' and blank lines are ignored.
+10.1038/nature11234
+10.1126/science.1110591
+10.1128/aem.71.12.8228-8235.2005
+10.1371/journal.pcbi.1002358
+10.1038/nature11053
+10.1186/gb-2011-12-6-r60
+10.1126/science.1206025
+10.1038/nature08821
