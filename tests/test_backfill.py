@@ -26,23 +26,39 @@ def make_outcome(linked=0, stored=0, errors=None):
     return out
 
 
-def run_backfill(nodes, ingest_outcomes=None, only_missing=False):
+def run_backfill(nodes, ingest_outcomes=None, only_missing=False, statuses=None):
     # backfill delegates to the same ingest_batch pipeline as fresh instantiation;
     # patch it and capture the DOIs it is handed.
     ingest_outcomes = [] if ingest_outcomes is None else ingest_outcomes
+    if isinstance(nodes, dict):
+        nodes_by_status = nodes
+    else:
+        nodes_by_status = {
+            "queued": [],
+            "scaffolded": nodes,
+            "failed": [],
+        }
+
+    def get_by_status(status):
+        return nodes_by_status.get(status, [])
+
+    kwargs = {"workers": 2, "only_missing": only_missing}
+    if statuses is not None:
+        kwargs["statuses"] = statuses
+
     with patch(
-        "pipeline.ingestion.trellis.get_by_pipeline_status", return_value=nodes
-    ), patch(
+        "pipeline.ingestion.trellis.get_by_pipeline_status", side_effect=get_by_status
+    ) as get_by_pipeline_status, patch(
         "pipeline.ingestion.ingest_batch", return_value=(ingest_outcomes, object())
     ) as ingest_batch:
-        outcomes, result = ingestion.backfill_nodes(workers=2, only_missing=only_missing)
-    return outcomes, result, ingest_batch
+        outcomes, result = ingestion.backfill_nodes(**kwargs)
+    return outcomes, result, ingest_batch, get_by_pipeline_status
 
 
 def test_full_scan_passes_all_doi_nodes_to_ingest_batch_and_aggregates():
     nodes = [node("a", uri="doi:10.1/a"), node("b", uri="doi:10.1/b")]
     ingest_outcomes = [make_outcome(linked=3, stored=10), make_outcome(linked=2, stored=7)]
-    outcomes, result, ingest_batch = run_backfill(nodes, ingest_outcomes)
+    outcomes, result, ingest_batch, _get_by_status = run_backfill(nodes, ingest_outcomes)
 
     ingest_batch.assert_called_once_with(["10.1/a", "10.1/b"], workers=2)
     assert result.candidates == 2
@@ -59,7 +75,7 @@ def test_only_missing_skips_already_topical_nodes():
         node("tagged", uri="doi:10.1/tagged", tags=["pipeline:scaffolded", "mesh:gut"]),
         node("missing", uri="doi:10.1/missing"),
     ]
-    _outcomes, result, ingest_batch = run_backfill(
+    _outcomes, result, ingest_batch, _get_by_status = run_backfill(
         nodes, [make_outcome(linked=1, stored=1)], only_missing=True
     )
 
@@ -70,7 +86,7 @@ def test_only_missing_skips_already_topical_nodes():
 
 def test_node_without_doi_is_skipped_and_excluded():
     nodes = [node("no-doi", uri=None, metadata={"reference": {}})]
-    outcomes, result, ingest_batch = run_backfill(nodes)
+    outcomes, result, ingest_batch, _get_by_status = run_backfill(nodes)
 
     assert result.skipped_no_doi == 1
     assert result.resolvable == 0
@@ -84,7 +100,7 @@ def test_outcome_errors_are_isolated_and_not_counted_as_processed():
         make_outcome(linked=4, stored=9),
         make_outcome(errors=["boom"]),
     ]
-    _outcomes, result, _ingest_batch = run_backfill(nodes, ingest_outcomes)
+    _outcomes, result, _ingest_batch, _get_by_status = run_backfill(nodes, ingest_outcomes)
 
     assert result.processed == 1
     assert result.edges_linked == 4
@@ -113,7 +129,61 @@ def test_doi_extraction_precedence_uri_before_metadata_before_tag():
             metadata={"reference": {}},
         ),
     ]
-    _outcomes, result, ingest_batch = run_backfill(nodes, [make_outcome(), make_outcome(), make_outcome()])
+    _outcomes, result, ingest_batch, _get_by_status = run_backfill(
+        nodes, [make_outcome(), make_outcome(), make_outcome()]
+    )
 
     assert result.resolvable == 3
     ingest_batch.assert_called_once_with(["10.uri/a", "10.meta/d", "10.tag/f"], workers=2)
+
+
+def test_backfill_scans_default_statuses_unions_and_dedupes_candidates():
+    shared = node("shared", uri="doi:10.1/shared")
+    nodes_by_status = {
+        "queued": [
+            node("queued", uri="doi:10.1/queued", tags=["pipeline:queued"]),
+            shared,
+        ],
+        "scaffolded": [
+            shared,
+            node("scaffolded", uri="doi:10.1/scaffolded"),
+        ],
+        "failed": [
+            {"id": "stable-id", "slug": "failed", "uri": "doi:10.1/failed", "tags": ["pipeline:failed"]},
+            {"id": "stable-id", "slug": "failed-copy", "uri": "doi:10.1/failed-copy", "tags": ["pipeline:failed"]},
+        ],
+        "digested": [
+            node("digested", uri="doi:10.1/digested", tags=["pipeline:digested"]),
+        ],
+    }
+
+    _outcomes, result, ingest_batch, get_by_status = run_backfill(
+        nodes_by_status,
+        [make_outcome(), make_outcome(), make_outcome(), make_outcome()],
+    )
+
+    assert result.candidates == 4
+    assert result.resolvable == 4
+    ingest_batch.assert_called_once_with(
+        ["10.1/queued", "10.1/shared", "10.1/scaffolded", "10.1/failed"],
+        workers=2,
+    )
+    assert [call.args[0] for call in get_by_status.call_args_list] == ["queued", "scaffolded", "failed"]
+
+
+def test_backfill_accepts_custom_statuses():
+    nodes_by_status = {
+        "failed": [node("failed", uri="doi:10.1/failed", tags=["pipeline:failed"])],
+        "queued": [node("queued", uri="doi:10.1/queued", tags=["pipeline:queued"])],
+    }
+
+    _outcomes, result, ingest_batch, get_by_status = run_backfill(
+        nodes_by_status,
+        [make_outcome()],
+        statuses=("failed",),
+    )
+
+    assert result.candidates == 1
+    assert result.resolvable == 1
+    ingest_batch.assert_called_once_with(["10.1/failed"], workers=2)
+    assert [call.args[0] for call in get_by_status.call_args_list] == ["failed"]

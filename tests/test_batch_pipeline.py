@@ -1,7 +1,7 @@
 import sys
 import threading
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -180,6 +180,28 @@ class TestBatchWorkers:
         assert result is None
         assert outcomes[0].errors == ["verify failed"]
 
+    def test_set_final_pipeline_status_marks_success_and_failure(self):
+        outcomes = [
+            IngestionOutcome(upsert=UpsertResult("ok", True)),
+            IngestionOutcome(upsert=UpsertResult("bad", True), errors=["existing error"]),
+        ]
+
+        with patch("pipeline.ingestion.trellis.set_pipeline_status") as set_status:
+            ingestion.set_final_pipeline_status((0, "10.1/ok", "ok"), outcomes)
+            ingestion.set_final_pipeline_status((1, "10.1/bad", "bad"), outcomes)
+
+        assert outcomes[0].errors == []
+        assert outcomes[1].errors == ["existing error"]
+        set_status.assert_has_calls([call("ok", "digested"), call("bad", "failed")])
+
+    def test_set_final_pipeline_status_captures_status_update_error(self):
+        outcomes = [IngestionOutcome(upsert=UpsertResult("ok", True))]
+
+        with patch("pipeline.ingestion.trellis.set_pipeline_status", side_effect=RuntimeError("status failed")):
+            ingestion.set_final_pipeline_status((0, "10.1/ok", "ok"), outcomes)
+
+        assert outcomes[0].errors == ["status failed"]
+
     def test_reverse_materialize_upserted_uses_resolved_doi(self):
         outcomes = [IngestionOutcome(resolve=resolved(doi="10.1/resolved"))]
         index = {"by_doi": {}}
@@ -245,6 +267,8 @@ class TestIngestBatch:
         ), patch(
             "pipeline.ingestion.verify_outcome", return_value=ingestion.VerifyResult(True, True, "scaffolded", 1)
         ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ), patch(
             "pipeline.ingestion.fetch_outbound_citations"
         ) as fetch:
             outcomes, metrics = ingestion.ingest_batch(dois, workers=3)
@@ -273,6 +297,7 @@ class TestIngestBatch:
             "phase2 fetch+store",
             "phase3 link",
             "phase4 verify",
+            "phase5 status",
         } <= phase_names
         assert metrics.workers == 3
         assert metrics.total_seconds >= 0
@@ -287,6 +312,7 @@ class TestIngestBatch:
         assert phase_items["phase2 fetch+store"] == 2
         assert phase_items["phase3 link"] == 2
         assert phase_items["phase4 verify"] == 2
+        assert phase_items["phase5 status"] == 2
         batch_resolve.assert_called_once_with(dois)
         assert build_index.call_count == 2
         assert reverse.call_count == 2
@@ -330,6 +356,8 @@ class TestIngestBatch:
             "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(0, 0)
         ), patch(
             "pipeline.ingestion.verify_outcome", return_value=ingestion.VerifyResult(True, True, "scaffolded", 0)
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
         ):
             outcomes, _metrics = ingestion.ingest_batch(dois, workers=1)
 

@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import subprocess
+import time
 import unicodedata
 from pathlib import Path
 from typing import Optional
@@ -51,24 +52,37 @@ PIPELINE_TAGS = {
 # ---------------------------------------------------------------------------
 
 def _run(*args: str) -> str:
-    try:
-        result = subprocess.run(
-            [TRELLIS_BIN, *args],
-            cwd=_workspace(),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except subprocess.TimeoutExpired as exc:
-        command = " ".join([TRELLIS_BIN, *args])
-        raise RuntimeError(f"{command} timed out after {exc.timeout} seconds") from exc
-    if result.returncode != 0:
+    last_result = None
+    for attempt in range(5):
+        try:
+            result = subprocess.run(
+                [TRELLIS_BIN, *args],
+                cwd=_workspace(),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            command = " ".join([TRELLIS_BIN, *args])
+            raise RuntimeError(f"{command} timed out after {exc.timeout} seconds") from exc
+        if result.returncode == 0:
+            return result.stdout.strip()
+
+        last_result = result
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        if "locked" not in combined and "busy" not in combined:
+            break
+        if attempt < 4:
+            time.sleep(0.1 * (2 ** attempt))
+
+    result = last_result
+    if result is not None and result.returncode != 0:
         raise RuntimeError(
             f"trellis {args[0]!r} failed (exit {result.returncode}):\n"
             f"  stdout: {result.stdout.strip()}\n"
             f"  stderr: {result.stderr.strip()}"
         )
-    return result.stdout.strip()
+    return ""
 
 
 def _run_json(*args: str) -> object:

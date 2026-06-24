@@ -22,16 +22,18 @@ def main() -> int:
         action="store_true",
         help="skip nodes that already have topical tags (faster, but will not backfill citation edges on those nodes)",
     )
-    parser.add_argument("--status", default="scaffolded")
+    parser.add_argument("--statuses", default="queued,scaffolded,failed")
     args = parser.parse_args()
+    statuses = tuple(status.strip() for status in args.statuses.split(",") if status.strip())
 
     _outcomes, result = backfill_nodes(
         workers=args.workers,
         only_missing=args.only_missing,
-        status=args.status,
+        statuses=statuses,
     )
 
     print("Backfill summary")
+    print(f"  statuses: {','.join(statuses)}")
     print(f"  candidates: {result.candidates}")
     print(f"  resolvable: {result.resolvable}")
     print(f"  processed: {result.processed}")

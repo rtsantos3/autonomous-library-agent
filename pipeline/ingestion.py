@@ -967,6 +967,19 @@ def verify_upserted(
         outcome.errors.append(str(e))
 
 
+def set_final_pipeline_status(
+    item: tuple[int, str, str],
+    outcomes: list[IngestionOutcome],
+) -> None:
+    idx, _doi, slug = item
+    outcome = outcomes[idx]
+    try:
+        status = "failed" if outcome.errors else "digested"
+        trellis.set_pipeline_status(slug, status)
+    except Exception as e:
+        outcome.errors.append(str(e))
+
+
 _TOPICAL_TAG_PREFIXES = ("mesh:", "field:", "type:")
 
 
@@ -995,7 +1008,7 @@ def _doi_from_node(node: dict) -> Optional[str]:
 def backfill_nodes(
     workers: int = 8,
     only_missing: bool = False,
-    status: str = "scaffolded",
+    statuses: tuple[str, ...] = ("queued", "scaffolded", "failed"),
 ) -> tuple[list[IngestionOutcome], BackfillResult]:
     """
     Full re-scan of existing entries through the SAME pipeline used for new
@@ -1009,7 +1022,18 @@ def backfill_nodes(
     carrying topical tags; the default (False) reprocesses every entry, which is
     what actually backfills citation edges (a node can have tags but no edges).
     """
-    candidates = trellis.get_by_pipeline_status(status)
+    candidates = []
+    seen_candidates = set()
+    for status in statuses:
+        for node in trellis.get_by_pipeline_status(status):
+            identities = {value for value in (node.get("id"), node.get("uuid"), node.get("slug")) if value}
+            if not identities:
+                identities = {id(node)}
+            if identities & seen_candidates:
+                continue
+            seen_candidates.update(identities)
+            candidates.append(node)
+
     result = BackfillResult(
         candidates=len(candidates),
         resolvable=0,
@@ -1142,6 +1166,12 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
         list(executor.map(lambda item: verify_upserted(item, outcomes), upserted))
     elapsed = time.perf_counter() - t0
     add_phase("phase4 verify", elapsed, len(upserted))
+
+    t0 = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(lambda item: set_final_pipeline_status(item, outcomes), upserted))
+    elapsed = time.perf_counter() - t0
+    add_phase("phase5 status", elapsed, len(upserted))
 
     metrics = BatchMetrics(
         phases=phases,

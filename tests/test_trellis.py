@@ -53,6 +53,65 @@ def test_run_raises_runtime_error_on_subprocess_timeout():
     assert run.call_args.kwargs["timeout"] == 120
 
 
+def test_run_retries_busy_failure_and_returns_success():
+    busy = subprocess.CompletedProcess(
+        ["trellis", "find"],
+        1,
+        stdout="",
+        stderr="database is locked",
+    )
+    success = subprocess.CompletedProcess(
+        ["trellis", "find"],
+        0,
+        stdout="[]\n",
+        stderr="",
+    )
+
+    with patch("pipeline.trellis.subprocess.run", side_effect=[busy, success]) as run, patch(
+        "pipeline.trellis.time.sleep"
+    ) as sleep:
+        assert trellis._run("find") == "[]"
+
+    assert run.call_count == 2
+    sleep.assert_called_once_with(0.1)
+
+
+def test_run_persistent_busy_raises_after_max_attempts():
+    busy = subprocess.CompletedProcess(
+        ["trellis", "update"],
+        1,
+        stdout="database busy",
+        stderr="",
+    )
+
+    with patch("pipeline.trellis.subprocess.run", return_value=busy) as run, patch(
+        "pipeline.trellis.time.sleep"
+    ) as sleep:
+        with pytest.raises(RuntimeError, match="database busy"):
+            trellis._run("update")
+
+    assert run.call_count == 5
+    assert [call.args[0] for call in sleep.call_args_list] == [0.1, 0.2, 0.4, 0.8]
+
+
+def test_run_non_busy_failure_raises_without_retry():
+    failure = subprocess.CompletedProcess(
+        ["trellis", "find"],
+        2,
+        stdout="",
+        stderr="bad args",
+    )
+
+    with patch("pipeline.trellis.subprocess.run", return_value=failure) as run, patch(
+        "pipeline.trellis.time.sleep"
+    ) as sleep:
+        with pytest.raises(RuntimeError, match="bad args"):
+            trellis._run("find")
+
+    assert run.call_count == 1
+    sleep.assert_not_called()
+
+
 def test_node_identifier_prefers_id_then_uuid_then_slug():
     assert trellis._node_identifier({"id": "id", "uuid": "uuid", "slug": "slug"}) == "id"
     assert trellis._node_identifier({"uuid": "uuid", "slug": "slug"}) == "uuid"
