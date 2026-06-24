@@ -60,9 +60,11 @@ class BatchMetrics:
 class BackfillResult:
     candidates: int
     resolvable: int
-    backfilled: int
+    processed: int
     skipped_no_doi: int
     skipped_already_tagged: int
+    edges_linked: int = 0
+    citations_stored: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -947,46 +949,33 @@ def _doi_from_node(node: dict) -> Optional[str]:
     return None
 
 
-def _backfill_one(
-    item: tuple[int, str],
-    outcomes: list[IngestionOutcome],
-    prefetched_for_doi,
-) -> Optional[int]:
-    idx, doi = item
-    outcome = outcomes[idx]
-    try:
-        outcome.parse = parse_input({"doi": doi})
-        outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched_for_doi(doi))
-        outcome.dedup = find_existing(outcome.resolve)
-        outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
-        return idx
-    except Exception as e:
-        outcome.errors.append(str(e))
-        return None
-
-
 def backfill_nodes(
     workers: int = 8,
-    only_missing: bool = True,
+    only_missing: bool = False,
     status: str = "scaffolded",
 ) -> tuple[list[IngestionOutcome], BackfillResult]:
     """
-    Re-run the existing resolve/dedup/upsert scaffold path for old nodes only.
+    Full re-scan of existing entries through the SAME pipeline used for new
+    instantiation. Each existing node already carries its DOI, so feeding those
+    DOIs through ingest_batch updates the nodes in place via upsert_node's
+    dedup-merge path (an upsert: existing -> update, missing -> insert; no
+    duplicates) while building the citation tags AND edges that older scaffold
+    runs never produced.
 
-    Backfill deliberately stops before citation storage/linking: the goal is to
-    merge newly-available topical tags and missing reference metadata onto nodes
-    that already exist, while leaving citation graph materialization unchanged.
+    only_missing=True is an optional optimization that skips nodes already
+    carrying topical tags; the default (False) reprocesses every entry, which is
+    what actually backfills citation edges (a node can have tags but no edges).
     """
     candidates = trellis.get_by_pipeline_status(status)
     result = BackfillResult(
         candidates=len(candidates),
         resolvable=0,
-        backfilled=0,
+        processed=0,
         skipped_no_doi=0,
         skipped_already_tagged=0,
     )
 
-    doi_items: list[tuple[int, str]] = []
+    dois: list[str] = []
     for node in candidates:
         if only_missing and _has_topical_backfill_tags(node):
             result.skipped_already_tagged += 1
@@ -995,39 +984,24 @@ def backfill_nodes(
         if not doi:
             result.skipped_no_doi += 1
             continue
-        doi_items.append((len(doi_items), doi))
+        dois.append(doi)
 
-    result.resolvable = len(doi_items)
-    outcomes = [IngestionOutcome() for _idx, _doi in doi_items]
-    if not doi_items:
-        return outcomes, result
+    result.resolvable = len(dois)
+    if not dois:
+        return [], result
 
-    from pipeline.aggregator import batch_resolve
-
-    resolved_map = batch_resolve([doi for _idx, doi in doi_items])
-
-    def prefetched_for_doi(doi: str):
-        key = bare_doi(doi)
-        return resolved_map.get(key.lower()) if key else None
-
-    # Warm a single graph index for consistency with batch ingestion's startup
-    # behavior. Existing find_existing/upsert_node own the actual dedup/merge.
-    trellis.build_node_index()
-
-    max_workers = max(int(workers or 1), 1)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        backfilled = list(
-            executor.map(
-                lambda item: _backfill_one(item, outcomes, prefetched_for_doi),
-                doi_items,
-            )
-        )
-
-    result.backfilled = sum(1 for item in backfilled if item is not None)
-    for idx, outcome in enumerate(outcomes):
-        for error in outcome.errors:
-            doi = doi_items[idx][1]
-            result.errors.append(f"{doi}: {error}")
+    # Reuse the instantiation pipeline verbatim: resolve -> dedup-merge upsert ->
+    # fetch citations -> link edges -> verify. Existing nodes update in place.
+    outcomes, _metrics = ingest_batch(dois, workers=workers)
+    for outcome in outcomes:
+        if outcome.errors:
+            result.errors.extend(outcome.errors)
+            continue
+        result.processed += 1
+        if outcome.link is not None:
+            result.edges_linked += outcome.link.linked
+        if outcome.citation_store is not None:
+            result.citations_stored += outcome.citation_store.stored
     return outcomes, result
 
 

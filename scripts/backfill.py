@@ -18,23 +18,25 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
-        "--all",
+        "--only-missing",
         action="store_true",
-        help="process all nodes for the status, including already-tagged nodes",
+        help="skip nodes that already have topical tags (faster, but will not backfill citation edges on those nodes)",
     )
     parser.add_argument("--status", default="scaffolded")
     args = parser.parse_args()
 
     _outcomes, result = backfill_nodes(
         workers=args.workers,
-        only_missing=not args.all,
+        only_missing=args.only_missing,
         status=args.status,
     )
 
     print("Backfill summary")
     print(f"  candidates: {result.candidates}")
     print(f"  resolvable: {result.resolvable}")
-    print(f"  backfilled: {result.backfilled}")
+    print(f"  processed: {result.processed}")
+    print(f"  edges_linked: {result.edges_linked}")
+    print(f"  citations_stored: {result.citations_stored}")
     print(f"  skipped_no_doi: {result.skipped_no_doi}")
     print(f"  skipped_already_tagged: {result.skipped_already_tagged}")
     print(f"  errors: {len(result.errors)}")
