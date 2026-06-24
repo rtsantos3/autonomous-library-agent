@@ -685,6 +685,26 @@ def find_existing(resolved: ResolveResult) -> DedupResult:
     return DedupResult(None, None)
 
 
+def find_existing_indexed(resolved: ResolveResult, index: dict) -> DedupResult:
+    if resolved.s2_id:
+        node = trellis.dedup_check_indexed(index, s2id=resolved.s2_id)
+        if node:
+            return DedupResult(node, "s2_id")
+    if resolved.doi:
+        node = trellis.dedup_check_indexed(index, doi=resolved.doi)
+        if node:
+            return DedupResult(node, "doi")
+    if resolved.pmid:
+        node = trellis.dedup_check_indexed(index, pmid=resolved.pmid)
+        if node:
+            return DedupResult(node, "pmid")
+    if resolved.title:
+        node = trellis.dedup_check_indexed(index, title=resolved.title)
+        if node:
+            return DedupResult(node, "title")
+    return DedupResult(None, None)
+
+
 def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
     metadata = {"reference": _reference_metadata(resolved)}
     tags = _make_tags(resolved)
@@ -853,6 +873,7 @@ def resolve_and_upsert(
     resolve_timings: list[float],
     upsert_timings: list[float],
     timing_lock: threading.Lock,
+    index: dict,
 ) -> Optional[tuple[int, str, str]]:
     idx, doi = item
     outcome = outcomes[idx]
@@ -861,7 +882,7 @@ def resolve_and_upsert(
         t0 = time.perf_counter()
         outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched_for_doi(doi))
         resolve_elapsed = time.perf_counter() - t0
-        outcome.dedup = find_existing(outcome.resolve)
+        outcome.dedup = find_existing_indexed(outcome.resolve, index)
         t0 = time.perf_counter()
         outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
         upsert_elapsed = time.perf_counter() - t0
@@ -1056,6 +1077,7 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
                     resolve_timings,
                     upsert_timings,
                     timing_lock,
+                    index,
                 ),
                 enumerate(dois),
             )

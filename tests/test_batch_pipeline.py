@@ -66,8 +66,10 @@ class TestBatchWorkers:
         lock = threading.Lock()
         fetched = prefetched()
 
+        index = {"by_doi": {}}
+
         with patch("pipeline.ingestion.resolve_identity", return_value=resolved()) as resolve, patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult(None, None)
+            "pipeline.ingestion.find_existing_indexed", return_value=DedupResult(None, None)
         ) as dedup, patch("pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)) as upsert:
             result = ingestion.resolve_and_upsert(
                 (0, "10.1/x"),
@@ -76,6 +78,7 @@ class TestBatchWorkers:
                 resolve_timings,
                 upsert_timings,
                 lock,
+                index,
             )
 
         assert result == (0, "10.1/x", "source")
@@ -89,7 +92,7 @@ class TestBatchWorkers:
         assert resolve_timings[0] >= 0
         assert upsert_timings[0] >= 0
         resolve.assert_called_once_with(outcomes[0].parse, prefetched=fetched)
-        dedup.assert_called_once_with(outcomes[0].resolve)
+        dedup.assert_called_once_with(outcomes[0].resolve, index)
         upsert.assert_called_once_with(outcomes[0].resolve, outcomes[0].dedup)
 
     def test_resolve_and_upsert_catches_exception(self):
@@ -103,6 +106,7 @@ class TestBatchWorkers:
                 [],
                 [],
                 threading.Lock(),
+                {},
             )
 
         assert result is None
@@ -200,7 +204,7 @@ class TestIngestBatch:
         ) as build_index, patch("pipeline.ingestion.trellis.reverse_materialize") as reverse, patch(
             "pipeline.ingestion.resolve_identity", side_effect=resolve_identity
         ), patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult(None, None)
+            "pipeline.ingestion.find_existing_indexed", return_value=DedupResult(None, None)
         ), patch(
             "pipeline.ingestion.upsert_node", side_effect=upsert_node
         ), patch(
@@ -257,3 +261,51 @@ class TestIngestBatch:
         assert reverse.call_count == 2
         assert [call.kwargs["doi"] for call in reverse.call_args_list] == ["10.1/a", "10.1/c"]
         fetch.assert_not_called()
+
+    def test_ingest_batch_phase1_dedup_uses_index_not_subprocess_chain(self):
+        dois = ["10.1/a"]
+        indexed_match = {"slug": "existing-a", "tags": ["pipeline:scaffolded"], "metadata": {}}
+        index = {"by_doi": {"10.1/a": indexed_match}}
+
+        def resolve_identity(parsed, prefetched=None):
+            return resolved(doi=parsed.doi, s2_id=None, pmid=None, title="Indexed microbiome paper")
+
+        with patch("pipeline.aggregator.batch_resolve", return_value={"10.1/a": prefetched(doi="10.1/a")}), patch(
+            "pipeline.ingestion.trellis.build_node_index",
+            side_effect=[index, {"pending_citations": {}}],
+        ), patch(
+            "pipeline.ingestion.resolve_identity", side_effect=resolve_identity
+        ), patch(
+            "pipeline.ingestion.find_existing", side_effect=AssertionError("subprocess dedup should not run")
+        ), patch(
+            "pipeline.ingestion.trellis.find_by_s2id", side_effect=AssertionError("find_by_s2id should not run")
+        ) as find_by_s2id, patch(
+            "pipeline.ingestion.trellis.find_by_doi", side_effect=AssertionError("find_by_doi should not run")
+        ) as find_by_doi, patch(
+            "pipeline.ingestion.trellis.find_by_pmid", side_effect=AssertionError("find_by_pmid should not run")
+        ) as find_by_pmid, patch(
+            "pipeline.ingestion.trellis.find_by_title", side_effect=AssertionError("find_by_title should not run")
+        ) as find_by_title, patch(
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes, patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=indexed_match
+        ) as dedup_indexed, patch(
+            "pipeline.ingestion.upsert_node", return_value=UpsertResult("existing-a", False)
+        ), patch(
+            "pipeline.ingestion.trellis.reverse_materialize", return_value=0
+        ), patch(
+            "pipeline.ingestion.store_citations", return_value=ingestion.CitationStoreResult(0)
+        ), patch(
+            "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(0, 0)
+        ), patch(
+            "pipeline.ingestion.verify_outcome", return_value=ingestion.VerifyResult(True, True, "scaffolded", 0)
+        ):
+            outcomes, _metrics = ingestion.ingest_batch(dois, workers=1)
+
+        assert outcomes[0].dedup == DedupResult(indexed_match, "doi")
+        dedup_indexed.assert_called_once_with(index, doi="10.1/a")
+        find_by_s2id.assert_not_called()
+        find_by_doi.assert_not_called()
+        find_by_pmid.assert_not_called()
+        find_by_title.assert_not_called()
+        grep_nodes.assert_not_called()

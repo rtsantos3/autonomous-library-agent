@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import call, patch
@@ -40,6 +41,16 @@ def test_unwrap_node_and_list_accept_trellis_response_shapes():
     assert trellis._unwrap_list({"results": nodes}) == nodes
     assert trellis._unwrap_list({"nodes": nodes}) == nodes
     assert trellis._unwrap_list(None) == []
+
+
+def test_run_raises_runtime_error_on_subprocess_timeout():
+    timeout = subprocess.TimeoutExpired(cmd=["trellis", "find"], timeout=120)
+
+    with patch("pipeline.trellis.subprocess.run", side_effect=timeout) as run:
+        with pytest.raises(RuntimeError, match="trellis find timed out after 120 seconds"):
+            trellis._run("find")
+
+    assert run.call_args.kwargs["timeout"] == 120
 
 
 def test_node_identifier_prefers_id_then_uuid_then_slug():

@@ -51,12 +51,17 @@ PIPELINE_TAGS = {
 # ---------------------------------------------------------------------------
 
 def _run(*args: str) -> str:
-    result = subprocess.run(
-        [TRELLIS_BIN, *args],
-        cwd=_workspace(),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [TRELLIS_BIN, *args],
+            cwd=_workspace(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        command = " ".join([TRELLIS_BIN, *args])
+        raise RuntimeError(f"{command} timed out after {exc.timeout} seconds") from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"trellis {args[0]!r} failed (exit {result.returncode}):\n"
