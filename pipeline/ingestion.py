@@ -57,6 +57,16 @@ class BatchMetrics:
 
 
 @dataclass
+class BackfillResult:
+    candidates: int
+    resolvable: int
+    backfilled: int
+    skipped_no_doi: int
+    skipped_already_tagged: int
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ParseResult:
     title: Optional[str]
     doi: Optional[str]
@@ -910,6 +920,115 @@ def verify_upserted(
         outcome.verify = verify_outcome(slug)
     except Exception as e:
         outcome.errors.append(str(e))
+
+
+_TOPICAL_TAG_PREFIXES = ("mesh:", "field:", "type:")
+
+
+def _has_topical_backfill_tags(node: dict) -> bool:
+    return any(str(tag).startswith(_TOPICAL_TAG_PREFIXES) for tag in node.get("tags") or [])
+
+
+def _doi_from_node(node: dict) -> Optional[str]:
+    doi = bare_doi(node.get("uri"))
+    if doi:
+        return doi
+    reference = (node.get("metadata") or {}).get("reference", {})
+    if isinstance(reference, dict):
+        doi = bare_doi(reference.get("doi"))
+        if doi:
+            return doi
+    for tag in node.get("tags") or []:
+        tag = str(tag)
+        if tag.startswith("doi:"):
+            doi = bare_doi(tag)
+            if doi:
+                return doi
+    return None
+
+
+def _backfill_one(
+    item: tuple[int, str],
+    outcomes: list[IngestionOutcome],
+    prefetched_for_doi,
+) -> Optional[int]:
+    idx, doi = item
+    outcome = outcomes[idx]
+    try:
+        outcome.parse = parse_input({"doi": doi})
+        outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched_for_doi(doi))
+        outcome.dedup = find_existing(outcome.resolve)
+        outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
+        return idx
+    except Exception as e:
+        outcome.errors.append(str(e))
+        return None
+
+
+def backfill_nodes(
+    workers: int = 8,
+    only_missing: bool = True,
+    status: str = "scaffolded",
+) -> tuple[list[IngestionOutcome], BackfillResult]:
+    """
+    Re-run the existing resolve/dedup/upsert scaffold path for old nodes only.
+
+    Backfill deliberately stops before citation storage/linking: the goal is to
+    merge newly-available topical tags and missing reference metadata onto nodes
+    that already exist, while leaving citation graph materialization unchanged.
+    """
+    candidates = trellis.get_by_pipeline_status(status)
+    result = BackfillResult(
+        candidates=len(candidates),
+        resolvable=0,
+        backfilled=0,
+        skipped_no_doi=0,
+        skipped_already_tagged=0,
+    )
+
+    doi_items: list[tuple[int, str]] = []
+    for node in candidates:
+        if only_missing and _has_topical_backfill_tags(node):
+            result.skipped_already_tagged += 1
+            continue
+        doi = _doi_from_node(node)
+        if not doi:
+            result.skipped_no_doi += 1
+            continue
+        doi_items.append((len(doi_items), doi))
+
+    result.resolvable = len(doi_items)
+    outcomes = [IngestionOutcome() for _idx, _doi in doi_items]
+    if not doi_items:
+        return outcomes, result
+
+    from pipeline.aggregator import batch_resolve
+
+    resolved_map = batch_resolve([doi for _idx, doi in doi_items])
+
+    def prefetched_for_doi(doi: str):
+        key = bare_doi(doi)
+        return resolved_map.get(key.lower()) if key else None
+
+    # Warm a single graph index for consistency with batch ingestion's startup
+    # behavior. Existing find_existing/upsert_node own the actual dedup/merge.
+    trellis.build_node_index()
+
+    max_workers = max(int(workers or 1), 1)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        backfilled = list(
+            executor.map(
+                lambda item: _backfill_one(item, outcomes, prefetched_for_doi),
+                doi_items,
+            )
+        )
+
+    result.backfilled = sum(1 for item in backfilled if item is not None)
+    for idx, outcome in enumerate(outcomes):
+        for error in outcome.errors:
+            doi = doi_items[idx][1]
+            result.errors.append(f"{doi}: {error}")
+    return outcomes, result
 
 
 def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutcome], BatchMetrics]:
