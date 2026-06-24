@@ -161,6 +161,7 @@ class TestBatchWorkers:
 
     def test_verify_upserted_populates_outcome_and_returns_none(self):
         outcomes = [IngestionOutcome()]
+        outcomes[0].link = ingestion.LinkResult(3, 1)
         verify = ingestion.VerifyResult(True, True, "scaffolded", 3)
 
         with patch("pipeline.ingestion.verify_outcome", return_value=verify) as verify_outcome:
@@ -168,7 +169,7 @@ class TestBatchWorkers:
 
         assert result is None
         assert outcomes[0].verify == verify
-        verify_outcome.assert_called_once_with("source")
+        verify_outcome.assert_called_once_with("source", edge_count=3)
 
     def test_verify_upserted_catches_exception_and_returns_none(self):
         outcomes = [IngestionOutcome()]

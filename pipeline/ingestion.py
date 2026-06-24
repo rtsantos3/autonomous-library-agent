@@ -797,7 +797,7 @@ def link_citations(slug: str, citations: CitationResult, index: dict = None) -> 
     return LinkResult(linked=linked, skipped=skipped)
 
 
-def verify_outcome(slug: str) -> VerifyResult:
+def verify_outcome(slug: str, edge_count: int = 0) -> VerifyResult:
     try:
         node = trellis.get_node(slug)
         ref = ((node.get("metadata") or {}).get("reference") or {})
@@ -807,14 +807,11 @@ def verify_outcome(slug: str) -> VerifyResult:
             if str(tag).startswith("pipeline:"):
                 pipeline_status = str(tag).split(":", 1)[1]
                 break
-        edge_count = 0
-        for candidate in trellis.grep_nodes(slug):
-            if candidate.get("relation") == "references" or candidate.get("type") == "references":
-                edge_count += 1
         return VerifyResult(
             node_exists=True,
             has_citation_metadata=isinstance(items, list),
             pipeline_status=pipeline_status,
+            # Count of citation edges linked during this run, supplied from LinkResult.
             edge_count=edge_count,
         )
     except Exception as exc:
@@ -845,7 +842,10 @@ def ingest_reference_pipeline(raw: dict, prefetched=None) -> IngestionOutcome:
         outcome.citation_store = store_citations(outcome.upsert.slug, citations)
         index = trellis.build_node_index()
         outcome.link = link_citations(outcome.upsert.slug, citations, index=index)
-        outcome.verify = verify_outcome(outcome.upsert.slug)
+        outcome.verify = verify_outcome(
+            outcome.upsert.slug,
+            edge_count=(outcome.link.linked if outcome.link else 0),
+        )
     except (ValueError, RuntimeError) as e:
         outcome.errors.append(str(e))
     return outcome
@@ -943,7 +943,10 @@ def verify_upserted(
     idx, _doi, slug = item
     outcome = outcomes[idx]
     try:
-        outcome.verify = verify_outcome(slug)
+        outcome.verify = verify_outcome(
+            slug,
+            edge_count=(outcome.link.linked if outcome.link else 0),
+        )
     except Exception as e:
         outcome.errors.append(str(e))
 

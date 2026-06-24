@@ -730,42 +730,54 @@ class TestIngestionUnit:
             "metadata": {"reference": {"outbound_citations": {"items": []}}},
         }
         with patch("pipeline.ingestion.trellis.get_node", return_value=node), patch(
-            "pipeline.ingestion.trellis.grep_nodes", return_value=[]
-        ):
-            result = ingestion.verify_outcome("source")
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
+            result = ingestion.verify_outcome("source", edge_count=7)
         assert result.node_exists is True
         assert result.has_citation_metadata is True
         assert result.pipeline_status == "scaffolded"
+        assert result.edge_count == 7
+        grep_nodes.assert_not_called()
 
     def test_verify_node_missing(self):
-        with patch("pipeline.ingestion.trellis.get_node", side_effect=RuntimeError("missing")):
-            result = ingestion.verify_outcome("source")
+        with patch("pipeline.ingestion.trellis.get_node", side_effect=RuntimeError("missing")), patch(
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
+            result = ingestion.verify_outcome("source", edge_count=7)
         assert result.node_exists is False
+        assert result.edge_count == 0
+        grep_nodes.assert_not_called()
 
     def test_verify_node_without_pipeline_tag_returns_none_status(self):
         with patch("pipeline.ingestion.trellis.get_node", return_value={"tags": ["year:2024"], "metadata": {}}), patch(
-            "pipeline.ingestion.trellis.grep_nodes", return_value=[]
-        ):
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
             result = ingestion.verify_outcome("source")
         assert result.node_exists is True
         assert result.pipeline_status is None
+        assert result.edge_count == 0
+        grep_nodes.assert_not_called()
 
     def test_verify_outbound_citations_with_items_sets_metadata_true(self):
         node = {"tags": [], "metadata": {"reference": {"outbound_citations": {"items": [{"title": "Target"}]}}}}
         with patch("pipeline.ingestion.trellis.get_node", return_value=node), patch(
-            "pipeline.ingestion.trellis.grep_nodes", return_value=[]
-        ):
-            result = ingestion.verify_outcome("source")
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
+            result = ingestion.verify_outcome("source", edge_count=2)
         assert result.has_citation_metadata is True
+        assert result.edge_count == 2
+        grep_nodes.assert_not_called()
 
     def test_verify_missing_outbound_citations_sets_metadata_false(self):
         node = {"tags": ["pipeline:scaffolded"], "metadata": {"reference": {}}}
         with patch("pipeline.ingestion.trellis.get_node", return_value=node), patch(
-            "pipeline.ingestion.trellis.grep_nodes", return_value=[]
-        ):
-            result = ingestion.verify_outcome("source")
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
+            result = ingestion.verify_outcome("source", edge_count=3)
         assert result.node_exists is True
         assert result.has_citation_metadata is False
+        assert result.edge_count == 3
+        grep_nodes.assert_not_called()
 
     # orchestrator
     def test_pipeline_stops_after_parse_failure(self):
@@ -831,8 +843,8 @@ class TestIngestionUnit:
         ), patch("pipeline.ingestion.trellis.dedup_check_indexed", return_value=target) as dedup_indexed, patch(
             "pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}
         ) as link, patch(
-            "pipeline.ingestion.trellis.grep_nodes", return_value=[{"relation": "references"}]
-        ):
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
             outcome = ingestion.ingest_reference_pipeline(
                 {
                     "doi": "10.1/x",
@@ -871,6 +883,7 @@ class TestIngestionUnit:
         link.assert_called_once_with("source-slug", "target-id", "references")
         add.assert_called_once()
         annotate.assert_called_once()
+        grep_nodes.assert_not_called()
 
         with patch("pipeline.ingestion.http_get", return_value=Response({"paperId": "s2-source"})), patch(
             "pipeline.citations.http_get", return_value=Response(citations_payload)
@@ -960,8 +973,8 @@ class TestIngestionUnit:
         ), patch(
             "pipeline.ingestion.trellis.dedup_check_indexed", return_value=None
         ), patch(
-            "pipeline.ingestion.trellis.grep_nodes", return_value=[]
-        ):
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
             outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"}, prefetched=prefetched)
 
         assert outcome.errors == []
@@ -977,6 +990,7 @@ class TestIngestionUnit:
         assert "source:manual" in update.call_args_list[0].kwargs["tags"]
         assert update.call_args_list[1].args[0] == "existing-id"
         assert outcome.citation_store == ingestion.CitationStoreResult(1)
+        grep_nodes.assert_not_called()
 
     def test_pipeline_does_not_create_stub_nodes_for_unresolved_citations(self):
         citations = citation_result(
@@ -994,12 +1008,13 @@ class TestIngestionUnit:
         ), patch("pipeline.ingestion.trellis.update_node"), patch(
             "pipeline.ingestion.trellis.dedup_check", return_value=None
         ), patch(
-            "pipeline.ingestion.trellis.grep_nodes", return_value=[]
-        ):
+            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+        ) as grep_nodes:
             outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"})
         assert outcome.errors == []
         assert outcome.upsert.slug == "source"
         add.assert_called_once()
+        grep_nodes.assert_not_called()
 
 
 @pytest.mark.integration
