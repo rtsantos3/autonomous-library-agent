@@ -6,8 +6,7 @@
 # will NOT overwrite an existing .env. Steps:
 #   1. verify conda is available
 #   2. create the ./setup prefix env from environment.yml (only if absent)
-#   3. create .env from .env.example (only if absent) and point its
-#      TRELLIS_WORKSPACE at this repo (self-contained workspace)
+#   3. create .env from .env.example (only if absent)
 #   4. verify the `trellis` CLI is on PATH (verify-only; does not install it)
 #   5. report the resolved Trellis workspace and whether it is initialized
 #   6. run the offline test suite as a smoke check
@@ -17,6 +16,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 ENV_PREFIX="$REPO_ROOT/setup"
+# The Trellis workspace defaults to the parent of this pipeline repo (matches
+# pipeline/trellis.py's default and the submodule-in-library layout). The graph
+# export lives at <workspace>/graph/. Override via TRELLIS_WORKSPACE in .env.
+WS_DEFAULT="$(dirname "$REPO_ROOT")"
 
 say()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
@@ -44,14 +47,8 @@ if [ -f .env ]; then
   ok ".env already exists (left untouched)"
 else
   cp .env.example .env
-  # Point the fresh .env at this repo so the Trellis workspace is self-contained.
-  if grep -qE '^TRELLIS_WORKSPACE=' .env; then
-    tmp="$(mktemp)"
-    sed "s|^TRELLIS_WORKSPACE=.*|TRELLIS_WORKSPACE=$REPO_ROOT|" .env > "$tmp" && mv "$tmp" .env
-  else
-    printf '\nTRELLIS_WORKSPACE=%s\n' "$REPO_ROOT" >> .env
-  fi
   warn "created .env from .env.example — edit it and fill in your API keys"
+  warn "(TRELLIS_WORKSPACE left blank → default workspace: $WS_DEFAULT)"
 fi
 
 # 4. trellis CLI (verify only) -------------------------------------------------
@@ -67,9 +64,9 @@ fi
 #    TRELLIS_WORKSPACE in .env wins; otherwise default to the repo root.
 say "Resolving Trellis workspace"
 WS="$(grep -E '^TRELLIS_WORKSPACE=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-WS="${WS:-$REPO_ROOT}"
+WS="${WS:-$WS_DEFAULT}"
 ok "workspace: $WS"
-GRAPH_EXPORT="$REPO_ROOT/graph/trellis_export.jsonl"
+GRAPH_EXPORT="$WS/graph/trellis_export.jsonl"
 if [ -d "$WS/.trellis" ]; then
   ok "workspace already initialized (.trellis/ present) — leaving it untouched"
 elif [ -f "$GRAPH_EXPORT" ]; then
@@ -102,7 +99,9 @@ Next steps:
        python -c "from pipeline.ingestion import ingest_batch; \\
 dois=[l.strip() for l in open('samples/seed_dois.txt') if l.strip() and not l.startswith('#')]; \\
 o,m=ingest_batch(dois); print(len(o),'ingested')"
-  4. To share the resulting graph topology via git:
-       ./scripts/export_graph.sh        # writes graph/trellis_export.jsonl
+  4. To share the resulting graph topology via git (writes to the workspace root,
+     $WS_DEFAULT/graph/):
+       ./scripts/export_graph.sh
+       # then, from the workspace root:
        git add graph/trellis_export.jsonl && git commit -m "Update graph topology"
 EOF

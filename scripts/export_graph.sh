@@ -12,11 +12,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Resolve the workspace the same way setup.sh / pipeline.trellis does.
+# Resolve the workspace the same way setup.sh / pipeline.trellis does: default to
+# the parent of this pipeline repo (the library workspace), overridable via .env.
 WS="$(grep -E '^TRELLIS_WORKSPACE=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-WS="${WS:-$REPO_ROOT}"
+WS="${WS:-$(dirname "$REPO_ROOT")}"
 
-GRAPH_DIR="$REPO_ROOT/graph"
+GRAPH_DIR="$WS/graph"
 GRAPH_EXPORT="$GRAPH_DIR/trellis_export.jsonl"
 mkdir -p "$GRAPH_DIR"
 
