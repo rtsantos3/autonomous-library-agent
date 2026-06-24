@@ -1,4 +1,3 @@
-import subprocess
 import sys
 from dataclasses import asdict
 from datetime import date
@@ -98,26 +97,6 @@ def pubmed_xml(
       </PubmedArticle>
     </PubmedArticleSet>
     """
-
-
-@pytest.fixture
-def live_trellis():
-    try:
-        subprocess.run(["trellis", "--help"], capture_output=True, text=True, check=True)
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        pytest.skip("trellis not available")
-
-    created_slugs = []
-
-    def register(slug):
-        if slug:
-            created_slugs.append(slug)
-        return slug
-
-    yield register
-
-    for slug in created_slugs:
-        subprocess.run(["trellis", "rm", slug, "--json"], capture_output=True, text=True)
 
 
 class TestIngestionUnit:
@@ -803,7 +782,7 @@ class TestIngestionUnit:
 
 @pytest.mark.integration
 class TestIngestionIntegration:
-    def test_parse_and_resolve_real_doi(self, live_trellis):
+    def test_parse_and_resolve_real_doi(self, ephemeral_trellis):
         parsed = ingestion.parse_input({"doi": "10.1038/s41564-023-01464-1"})
         result = ingestion.resolve_identity(parsed)
         assert isinstance(result.title, str) and result.title
@@ -811,7 +790,7 @@ class TestIngestionIntegration:
         assert result.pmid is not None
         assert result.source in ("pubmed", "semantic-scholar", "input-only")
 
-    def test_citations_fetch_for_real_doi(self, live_trellis):
+    def test_citations_fetch_for_real_doi(self, ephemeral_trellis):
         result = fetch_outbound_citations("10.1038/nature11225")
         assert result.source == "semantic-scholar"
         assert isinstance(result.items, list)
@@ -819,38 +798,37 @@ class TestIngestionIntegration:
         assert all(isinstance(item.title, str) and item.title for item in result.items)
         assert result.retrieved_at == date.today().isoformat()
 
-    def test_full_pipeline_end_to_end_on_new_real_doi(self, live_trellis):
-        parsed = ingestion.parse_input({"doi": "10.1073/pnas.2304441120"})
-        resolved_real = ingestion.resolve_identity(parsed)
-        if ingestion.find_existing(resolved_real).existing_node:
-            pytest.skip("real DOI already exists in Trellis")
-
+    def test_full_pipeline_end_to_end_on_new_real_doi(self, ephemeral_trellis):
+        # Fresh instance => this DOI is guaranteed new, so created is reliably True
+        # (no need to skip-if-exists against a shared live graph).
         outcome = ingestion.ingest_reference_pipeline({"doi": "10.1073/pnas.2304441120"})
         assert outcome.errors == []
         assert outcome.upsert.created is True
         assert outcome.upsert.slug is not None
         assert outcome.citation_store.stored >= 0
 
-        live_trellis(outcome.upsert.slug)
         verify = ingestion.verify_outcome(outcome.upsert.slug)
         assert verify.node_exists is True
         assert verify.pipeline_status == "scaffolded"
 
-    def test_idempotency_on_existing_node(self, live_trellis):
-        outcome = ingestion.ingest_reference_pipeline({"doi": "10.1038/s41564-023-01464-1"})
-        assert outcome.errors == []
-        assert outcome.upsert.created is False
-        # Dedup returns the node's UUID (unambiguous for downstream trellis ops);
-        # verify it resolves back to the expected canonical node rather than
-        # pinning the identifier form.
-        existing = ingestion.trellis.get_node(outcome.upsert.slug)
-        assert ingestion._node_slug(existing) == "akkermansia-muciniphila-exacerbates-food-allergy-in-fibre-deprived-mice"
+    def test_reingest_updates_in_place_no_duplicate(self, ephemeral_trellis):
+        doi = "10.1038/s41564-023-01464-1"
+        first = ingestion.ingest_reference_pipeline({"doi": doi})
+        assert first.errors == []
+        assert first.upsert.created is True
 
-    def test_no_stub_nodes_created_for_unresolved_citations(self, live_trellis):
+        second = ingestion.ingest_reference_pipeline({"doi": doi})
+        assert second.errors == []
+        # upsert: the second pass matches the existing node and updates it.
+        assert second.upsert.created is False
+        # the re-ingest resolves back to the SAME node (no duplicate).
+        node = ingestion.trellis.get_node(second.upsert.slug)
+        assert ingestion._node_slug(node) == first.upsert.slug
+
+    def test_no_stub_nodes_created_for_unresolved_citations(self, ephemeral_trellis):
         before = ingestion.trellis.find_nodes(tag="pipeline:queued")
         outcome = ingestion.ingest_reference_pipeline({"doi": "10.1038/s42255-023-00744-8"})
         assert outcome.errors == []
-        live_trellis(outcome.upsert.slug)
 
         after = ingestion.trellis.find_nodes(tag="pipeline:queued")
         assert len(after) == len(before)

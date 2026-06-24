@@ -17,12 +17,20 @@ from typing import Optional
 import os
 
 TRELLIS_BIN = "trellis"
-# Trellis workspace root — the directory containing .trellis/
-# Override with TRELLIS_WORKSPACE env var when the workspace is not the repo root.
-PROJECT_ROOT = os.environ.get(
-    "TRELLIS_WORKSPACE",
-    str(Path(__file__).resolve().parents[2])  # LAD_library/ when cloned inside it
-)
+# Trellis workspace root — the directory containing .trellis/. Defaults to the
+# parent of the pipeline repo (LAD_library/ when cloned inside it).
+_DEFAULT_WORKSPACE = str(Path(__file__).resolve().parents[2])
+
+
+def _workspace() -> str:
+    # Resolved per call rather than frozen at import, so tests (and deploys) can
+    # repoint the Trellis workspace via TRELLIS_WORKSPACE — e.g. an ephemeral
+    # instance for integration tests — without reloading this module.
+    return os.environ.get("TRELLIS_WORKSPACE", _DEFAULT_WORKSPACE)
+
+
+# Back-compat module constant: the workspace as resolved at import time.
+PROJECT_ROOT = _workspace()
 PROJECT_SLUG = "microbiome-research-library"
 ACTOR = "daedalus"
 logger = logging.getLogger(__name__)
@@ -45,7 +53,7 @@ PIPELINE_TAGS = {
 def _run(*args: str) -> str:
     result = subprocess.run(
         [TRELLIS_BIN, *args],
-        cwd=PROJECT_ROOT,
+        cwd=_workspace(),
         capture_output=True,
         text=True,
     )

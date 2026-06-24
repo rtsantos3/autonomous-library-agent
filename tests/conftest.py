@@ -1,8 +1,45 @@
+import subprocess
+
 import pytest
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "integration: requires network and live Trellis")
+
+
+@pytest.fixture
+def ephemeral_trellis(tmp_path, monkeypatch):
+    """
+    Create a throwaway Trellis workspace, run the test against it, then discard it.
+
+    Integration tests must not touch the live library graph. This points the
+    pipeline's workspace (resolved per-call via TRELLIS_WORKSPACE) at a fresh,
+    empty instance, seeds the parent project node that upsert_node parents
+    references under, and yields the workspace path. pytest's tmp_path teardown
+    deletes the whole instance, and monkeypatch restores the env var.
+    """
+    try:
+        subprocess.run(["trellis", "--help"], capture_output=True, text=True, check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip("trellis not available")
+
+    from pipeline import trellis as trellis_mod
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("TRELLIS_WORKSPACE", str(workspace))
+
+    def _run(*args):
+        return subprocess.run(
+            ["trellis", *args], cwd=str(workspace), capture_output=True, text=True, check=True
+        )
+
+    _run("init")
+    # The ingestion pipeline parents every reference under this project node;
+    # a fresh instance needs it to exist before any add_reference.
+    _run("add", "project", trellis_mod.PROJECT_SLUG)
+
+    yield workspace
 
 
 def pytest_collection_modifyitems(config, items):
