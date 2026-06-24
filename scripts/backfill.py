@@ -23,6 +23,7 @@ def main() -> int:
         help="skip nodes that already have topical tags (faster, but will not backfill citation edges on those nodes)",
     )
     parser.add_argument("--statuses", default="queued,scaffolded,failed")
+    parser.add_argument("--chunk-size", type=int, default=100)
     args = parser.parse_args()
     statuses = tuple(status.strip() for status in args.statuses.split(",") if status.strip())
 
@@ -30,6 +31,7 @@ def main() -> int:
         workers=args.workers,
         only_missing=args.only_missing,
         statuses=statuses,
+        chunk_size=args.chunk_size,
     )
 
     print("Backfill summary")
@@ -39,6 +41,8 @@ def main() -> int:
     print(f"  processed: {result.processed}")
     print(f"  edges_linked: {result.edges_linked}")
     print(f"  citations_stored: {result.citations_stored}")
+    print(f"  failed: {result.failed}")
+    print(f"  needs_review: {result.needs_review}")
     print(f"  skipped_no_doi: {result.skipped_no_doi}")
     print(f"  skipped_already_tagged: {result.skipped_already_tagged}")
     print(f"  errors: {len(result.errors)}")

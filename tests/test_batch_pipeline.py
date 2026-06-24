@@ -180,19 +180,40 @@ class TestBatchWorkers:
         assert result is None
         assert outcomes[0].errors == ["verify failed"]
 
-    def test_set_final_pipeline_status_marks_success_and_failure(self):
+    def test_set_final_pipeline_status_marks_success_and_classified_failures(self):
         outcomes = [
             IngestionOutcome(upsert=UpsertResult("ok", True)),
-            IngestionOutcome(upsert=UpsertResult("bad", True), errors=["existing error"]),
+            IngestionOutcome(upsert=UpsertResult("permanent", True), errors=["Could not resolve a title for the reference"]),
+            IngestionOutcome(upsert=UpsertResult("transient", True), errors=["database is locked"]),
         ]
 
-        with patch("pipeline.ingestion.trellis.set_pipeline_status") as set_status:
+        with patch("pipeline.ingestion.trellis.set_pipeline_status") as set_status, patch(
+            "pipeline.ingestion.trellis.annotate_node"
+        ) as annotate:
             ingestion.set_final_pipeline_status((0, "10.1/ok", "ok"), outcomes)
-            ingestion.set_final_pipeline_status((1, "10.1/bad", "bad"), outcomes)
+            ingestion.set_final_pipeline_status((1, "10.1/permanent", "permanent"), outcomes)
+            ingestion.set_final_pipeline_status((2, "10.1/transient", "transient"), outcomes)
 
         assert outcomes[0].errors == []
-        assert outcomes[1].errors == ["existing error"]
-        set_status.assert_has_calls([call("ok", "digested"), call("bad", "failed")])
+        assert outcomes[1].errors == ["Could not resolve a title for the reference"]
+        assert outcomes[2].errors == ["database is locked"]
+        set_status.assert_has_calls(
+            [
+                call("ok", "digested"),
+                call("permanent", "needs-review"),
+                call("transient", "failed"),
+            ]
+        )
+        today = ingestion.date.today().isoformat()
+        annotate.assert_has_calls(
+            [
+                call(
+                    "permanent",
+                    f"[{today}] backfill needs-review: Could not resolve a title for the reference",
+                ),
+                call("transient", f"[{today}] backfill failed: database is locked"),
+            ]
+        )
 
     def test_set_final_pipeline_status_captures_status_update_error(self):
         outcomes = [IngestionOutcome(upsert=UpsertResult("ok", True))]

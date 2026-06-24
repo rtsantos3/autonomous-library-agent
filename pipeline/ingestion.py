@@ -65,6 +65,8 @@ class BackfillResult:
     skipped_already_tagged: int
     edges_linked: int = 0
     citations_stored: int = 0
+    failed: int = 0
+    needs_review: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -157,6 +159,23 @@ def _canonical_doi_uri(doi: Optional[str]) -> Optional[str]:
 
 def _node_slug(node: dict) -> Optional[str]:
     return node.get("slug") or node.get("id") or node.get("uuid")
+
+
+def _classify_failure(errors: list[str]) -> str:
+    permanent_markers = (
+        "could not resolve a title",
+        "provide a doi",
+        "404",
+        "not found",
+        "invalid doi",
+        "malformed",
+        "no doi",
+    )
+    for error in errors:
+        text = str(error).lower()
+        if any(marker in text for marker in permanent_markers):
+            return "needs-review"
+    return "failed"
 
 
 def _merge_missing(existing: dict, incoming: dict) -> dict:
@@ -974,8 +993,13 @@ def set_final_pipeline_status(
     idx, _doi, slug = item
     outcome = outcomes[idx]
     try:
-        status = "failed" if outcome.errors else "digested"
+        status = _classify_failure(outcome.errors) if outcome.errors else "digested"
         trellis.set_pipeline_status(slug, status)
+        if outcome.errors:
+            trellis.annotate_node(
+                slug,
+                f"[{date.today().isoformat()}] backfill {status}: {outcome.errors[0]}",
+            )
     except Exception as e:
         outcome.errors.append(str(e))
 
@@ -1009,6 +1033,7 @@ def backfill_nodes(
     workers: int = 8,
     only_missing: bool = False,
     statuses: tuple[str, ...] = ("queued", "scaffolded", "failed"),
+    chunk_size: int = 100,
 ) -> tuple[list[IngestionOutcome], BackfillResult]:
     """
     Full re-scan of existing entries through the SAME pipeline used for new
@@ -1057,19 +1082,33 @@ def backfill_nodes(
     if not dois:
         return [], result
 
-    # Reuse the instantiation pipeline verbatim: resolve -> dedup-merge upsert ->
-    # fetch citations -> link edges -> verify. Existing nodes update in place.
-    outcomes, _metrics = ingest_batch(dois, workers=workers)
-    for outcome in outcomes:
-        if outcome.errors:
-            result.errors.extend(outcome.errors)
-            continue
-        result.processed += 1
-        if outcome.link is not None:
-            result.edges_linked += outcome.link.linked
-        if outcome.citation_store is not None:
-            result.citations_stored += outcome.citation_store.stored
-    return outcomes, result
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    all_outcomes: list[IngestionOutcome] = []
+    # Reuse the instantiation pipeline verbatim per chunk: resolve ->
+    # dedup-merge upsert -> fetch citations -> link edges -> verify -> status.
+    # Each chunk builds its own index inside ingest_batch so later chunks can see
+    # nodes and edges created by earlier chunks.
+    for start in range(0, len(dois), chunk_size):
+        chunk = dois[start : start + chunk_size]
+        outcomes, _metrics = ingest_batch(chunk, workers=workers)
+        all_outcomes.extend(outcomes)
+        for outcome in outcomes:
+            if outcome.errors:
+                status = _classify_failure(outcome.errors)
+                if status == "needs-review":
+                    result.needs_review += 1
+                else:
+                    result.failed += 1
+                result.errors.extend(outcome.errors)
+                continue
+            result.processed += 1
+            if outcome.link is not None:
+                result.edges_linked += outcome.link.linked
+            if outcome.citation_store is not None:
+                result.citations_stored += outcome.citation_store.stored
+    return all_outcomes, result
 
 
 def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutcome], BatchMetrics]:
