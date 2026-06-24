@@ -50,6 +50,8 @@ def _coerce_year(value) -> Optional[int]:
 
 
 def _citation_from_reference(ref: dict) -> Optional[CitationItem]:
+    if not isinstance(ref, dict):
+        return None
     external_ids = (ref or {}).get("externalIds") or {}
     doi = _normalize_doi(external_ids.get("DOI"))
     pmid = external_ids.get("PubMed")
@@ -93,6 +95,22 @@ def _build_resolved(entry: dict) -> BatchResolved:
         publication_types=extend_unique([], entry.get("publicationTypes") or []),
         citations=citations,
     )
+
+
+def _malformed_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return True
+    authors = entry.get("authors")
+    if authors is not None and not isinstance(authors, list):
+        return True
+    if authors is not None and any(not isinstance(author, dict) for author in authors):
+        return True
+    references = entry.get("references")
+    if references is not None and not isinstance(references, list):
+        return True
+    if references is not None and any(not isinstance(ref, dict) for ref in references):
+        return True
+    return False
 
 
 def batch_resolve(dois: list[str], chunk_size: int = 500) -> dict[str, BatchResolved]:
@@ -164,6 +182,8 @@ def batch_resolve(dois: list[str], chunk_size: int = 500) -> dict[str, BatchReso
         # wrapped/non-list payload handling is defensive so entries are never mis-associated.
         for (input_key, _doi), entry in zip(chunk, entries or []):
             if not entry:
+                continue
+            if _malformed_entry(entry):
                 continue
             resolved = _build_resolved(entry)
             result[input_key] = resolved

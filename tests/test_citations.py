@@ -3,6 +3,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,6 +53,39 @@ def test_fetch_outbound_citations_json_error_returns_failed_source():
 
     assert result == CitationResult(
         source="semantic-scholar-failed",
+        retrieved_at=date.today().isoformat(),
+        items=[],
+    )
+
+
+@patch("pipeline.citations.http_get")
+@pytest.mark.parametrize("payload", [[], "not a dict"])
+def test_fetch_outbound_citations_malformed_top_level_payload_returns_empty(http_get, payload):
+    http_get.return_value = Response(payload)
+
+    result = fetch_outbound_citations("10.1/x")
+
+    assert result.items == []
+    assert result.source in {"semantic-scholar", "semantic-scholar-failed"}
+
+
+@patch("pipeline.citations.http_get")
+@pytest.mark.parametrize("payload", [{"other": []}, {"data": "not a list"}, {"data": {"bad": "shape"}}])
+def test_fetch_outbound_citations_missing_or_non_list_data_returns_empty(http_get, payload):
+    http_get.return_value = Response(payload)
+
+    result = fetch_outbound_citations("10.1/x")
+
+    assert result.items == []
+    assert result.source in {"semantic-scholar", "semantic-scholar-failed"}
+
+
+def test_fetch_outbound_citations_item_missing_cited_paper_returns_empty():
+    with patch("pipeline.citations.http_get", return_value=Response({"data": [{"notCitedPaper": {}}]})):
+        result = fetch_outbound_citations("10.1/x")
+
+    assert result == CitationResult(
+        source="semantic-scholar",
         retrieved_at=date.today().isoformat(),
         items=[],
     )

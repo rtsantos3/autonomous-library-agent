@@ -1,5 +1,4 @@
 import sys
-from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -524,6 +523,69 @@ class TestIngestionUnit:
         assert "(n.d.)" not in citation
         assert "A microbiome paper" in citation
 
+    def test_upsert_existing_dedup_id_without_tags_fetches_full_node_and_updates_by_id(self):
+        full_node = {
+            "id": "node-id",
+            "slug": "old",
+            "metadata": {"reference": {"custom": "keep"}},
+            "tags": ["pipeline:queued", "source:manual"],
+        }
+        with patch("pipeline.ingestion.trellis.get_node", return_value=full_node) as get_node, patch(
+            "pipeline.ingestion.trellis.update_node", return_value=full_node
+        ) as update, patch("pipeline.ingestion.trellis.annotate_node") as annotate:
+            result = ingestion.upsert_node(resolved(), DedupResult({"id": "node-id"}, "doi"))
+
+        assert result == UpsertResult(slug="node-id", created=False)
+        get_node.assert_called_once_with("node-id")
+        assert update.call_args.args[0] == "node-id"
+        assert annotate.call_args.args[0] == "node-id"
+
+    @pytest.mark.parametrize(
+        ("existing", "expected"),
+        [
+            ({"id": "node-id", "uuid": "node-uuid", "slug": "node-slug", "tags": []}, "node-id"),
+            ({"uuid": "node-uuid", "slug": "node-slug", "tags": []}, "node-uuid"),
+            ({"slug": "node-slug", "tags": []}, "node-slug"),
+        ],
+    )
+    def test_upsert_existing_update_target_prefers_id_then_uuid_then_slug(self, existing, expected):
+        existing = {**existing, "metadata": {}}
+        with patch("pipeline.ingestion.trellis.update_node", return_value=existing) as update, patch(
+            "pipeline.ingestion.trellis.annotate_node"
+        ):
+            result = ingestion.upsert_node(resolved(), DedupResult(existing, "doi"))
+
+        assert result == UpsertResult(slug=expected, created=False)
+        assert update.call_args.args[0] == expected
+
+    def test_upsert_existing_without_identifier_raises(self):
+        with pytest.raises(RuntimeError, match="no slug or UUID"):
+            ingestion.upsert_node(resolved(), DedupResult({"tags": [], "metadata": {}}, "doi"))
+
+    def test_upsert_existing_replaces_pipeline_tag_preserves_and_merges_topical_tags(self):
+        existing = {
+            "slug": "old",
+            "metadata": {},
+            "tags": ["pipeline:queued", "source:manual", "mesh:old-term"],
+        }
+        enriched = resolved(
+            fields_of_study=["Biology"],
+            mesh_terms=["Gastrointestinal Microbiome"],
+            keywords=["Short Chain Fatty Acids"],
+        )
+        with patch("pipeline.ingestion.trellis.update_node", return_value=existing) as update, patch(
+            "pipeline.ingestion.trellis.annotate_node"
+        ):
+            ingestion.upsert_node(enriched, DedupResult(existing, "doi"))
+
+        tags = update.call_args.kwargs["tags"]
+        assert "pipeline:queued" not in tags
+        assert "pipeline:scaffolded" in tags
+        assert "source:manual" in tags
+        assert "mesh:old-term" in tags
+        assert "mesh:gastrointestinal-microbiome" in tags
+        assert "kw:short-chain-fatty-acids" in tags
+
     # store_citations
     def test_store_merges_into_existing_metadata(self):
         node = {"metadata": {"reference": {"doi": "10.1/x"}, "other": {"x": 1}}}
@@ -631,6 +693,36 @@ class TestIngestionUnit:
         dedup.assert_called_once_with(s2id="s2-only", doi=None, pmid=None, title="")
         assert result.skipped == 1
 
+    def test_link_with_index_uses_indexed_dedup_prefers_identifier_and_skips_unidentified_targets(self):
+        citations = citation_result(
+            [
+                CitationItem("10.2/id", None, None, "Target ID", 2020),
+                CitationItem("10.2/uuid", None, None, "Target UUID", 2021),
+                CitationItem("10.2/slug", None, None, "Target Slug", 2022),
+                CitationItem("10.2/missing", None, None, "Target Missing", 2023),
+            ]
+        )
+        targets = [
+            {"id": "target-id", "uuid": "target-uuid", "slug": "target-slug"},
+            {"uuid": "uuid-only", "slug": "uuid-slug"},
+            {"slug": "slug-only"},
+            {"title": "no identifier"},
+        ]
+        index = {"by_doi": {}}
+        with patch("pipeline.ingestion.trellis.dedup_check_indexed", side_effect=targets) as indexed, patch(
+            "pipeline.ingestion.trellis.dedup_check"
+        ) as subprocess_dedup, patch("pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}) as link:
+            result = ingestion.link_citations("source", citations, index=index)
+
+        assert result == ingestion.LinkResult(linked=3, skipped=1)
+        assert indexed.call_count == 4
+        subprocess_dedup.assert_not_called()
+        assert [call.args for call in link.call_args_list] == [
+            ("source", "target-id", "references"),
+            ("source", "uuid-only", "references"),
+            ("source", "slug-only", "references"),
+        ]
+
     # verify_outcome
     def test_verify_success(self):
         node = {
@@ -688,32 +780,120 @@ class TestIngestionUnit:
         assert outcome.upsert is None
 
     def test_pipeline_full_success(self):
-        citations = citation_result()
-        with patch(
-            "pipeline.ingestion.parse_input", return_value=ParseResult("Title", "10.1/x", None, None, [], None, None)
-        ), patch("pipeline.ingestion.resolve_identity", return_value=resolved()), patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult(None, None)
-        ), patch("pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)), patch(
-            "pipeline.ingestion.fetch_outbound_citations", return_value=citations
-        ), patch("pipeline.ingestion.store_citations", return_value=ingestion.CitationStoreResult(0)), patch(
-            "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(0, 0)
-        ), patch(
-            "pipeline.ingestion.verify_outcome", return_value=ingestion.VerifyResult(True, True, "scaffolded", 0)
-        ):
-            outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"})
-        assert not outcome.errors
-        assert all(
-            asdict(part) is not None
-            for part in [
-                outcome.parse,
-                outcome.resolve,
-                outcome.dedup,
-                outcome.upsert,
-                outcome.citation_store,
-                outcome.link,
-                outcome.verify,
+        node_state = {}
+        phase_order = []
+
+        def add_reference(title, **kwargs):
+            phase_order.append("add")
+            node_state["source-slug"] = {
+                "id": "source-id",
+                "slug": "source-slug",
+                "title": title,
+                "metadata": kwargs["metadata"],
+                "tags": kwargs["tags"],
+            }
+            return {"id": "source-id", "slug": "source-slug"}
+
+        def get_node(slug):
+            phase_order.append(f"get:{slug}")
+            return node_state[slug]
+
+        def update_node(slug, **kwargs):
+            phase_order.append(f"update:{slug}:{'metadata' in kwargs}")
+            node_state[slug] = {**node_state[slug], **{k: v for k, v in kwargs.items() if v is not None}}
+            return node_state[slug]
+
+        citations_payload = {
+            "data": [
+                {
+                    "citedPaper": {
+                        "paperId": "s2-target",
+                        "title": "Existing target paper",
+                        "year": 2020,
+                        "externalIds": {"DOI": "10.2/target", "PubMed": "456"},
+                    }
+                }
             ]
+        }
+        target = {"id": "target-id", "slug": "target-slug"}
+        with patch("pipeline.ingestion.http_get", return_value=Response({"paperId": "s2-source"})), patch(
+            "pipeline.citations.http_get", return_value=Response(citations_payload)
+        ), patch("pipeline.ingestion.trellis.find_by_s2id", return_value=None), patch(
+            "pipeline.ingestion.trellis.find_by_doi", return_value=None
+        ), patch("pipeline.ingestion.trellis.find_by_pmid", return_value=None), patch(
+            "pipeline.ingestion.trellis.find_by_title", return_value=None
+        ), patch("pipeline.ingestion.trellis.add_reference", side_effect=add_reference) as add, patch(
+            "pipeline.ingestion.trellis.annotate_node"
+        ) as annotate, patch("pipeline.ingestion.trellis.get_node", side_effect=get_node), patch(
+            "pipeline.ingestion.trellis.update_node", side_effect=update_node
+        ) as update, patch(
+            "pipeline.ingestion.trellis.build_node_index", return_value={"by_doi": {"10.2/target": target}}
+        ), patch("pipeline.ingestion.trellis.dedup_check_indexed", return_value=target) as dedup_indexed, patch(
+            "pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}
+        ) as link, patch(
+            "pipeline.ingestion.trellis.grep_nodes", return_value=[{"relation": "references"}]
+        ):
+            outcome = ingestion.ingest_reference_pipeline(
+                {
+                    "doi": "10.1/x",
+                    "title": "A microbiome paper",
+                    "abstract": "Abstract",
+                    "authors": ["Author A", "Author B"],
+                    "year": "2024",
+                    "venue": "Journal",
+                }
+            )
+
+        assert not outcome.errors
+        assert outcome.resolve.doi == "10.1/x"
+        assert outcome.resolve.s2_id == "s2-source"
+        assert outcome.dedup == DedupResult(None, None)
+        assert outcome.upsert == UpsertResult("source-slug", True)
+        assert outcome.citation_store == ingestion.CitationStoreResult(1)
+        assert outcome.link == ingestion.LinkResult(1, 0)
+        assert outcome.verify == ingestion.VerifyResult(True, True, "scaffolded", 1)
+        assert phase_order == [
+            "add",
+            "get:source-slug",
+            "update:source-slug:True",
+            "get:source-slug",
+        ]
+        assert update.call_args_list[0].args[0] == "source-slug"
+        stored = update.call_args_list[0].kwargs["metadata"]["reference"]["outbound_citations"]["items"]
+        assert stored[0]["doi"] == "10.2/target"
+        dedup_indexed.assert_called_once_with(
+            {"by_doi": {"10.2/target": target}},
+            s2id="s2-target",
+            doi="10.2/target",
+            pmid="456",
+            title="Existing target paper",
         )
+        link.assert_called_once_with("source-slug", "target-id", "references")
+        add.assert_called_once()
+        annotate.assert_called_once()
+
+        with patch("pipeline.ingestion.http_get", return_value=Response({"paperId": "s2-source"})), patch(
+            "pipeline.citations.http_get", return_value=Response(citations_payload)
+        ), patch("pipeline.ingestion.trellis.find_by_s2id", return_value=None), patch(
+            "pipeline.ingestion.trellis.find_by_doi", return_value=None
+        ), patch("pipeline.ingestion.trellis.find_by_pmid", return_value=None), patch(
+            "pipeline.ingestion.trellis.find_by_title", return_value=None
+        ), patch("pipeline.ingestion.trellis.add_reference", return_value={"slug": "broken"}), patch(
+            "pipeline.ingestion.trellis.annotate_node"
+        ), patch("pipeline.ingestion.trellis.get_node", side_effect=RuntimeError("store failed")):
+            failed = ingestion.ingest_reference_pipeline(
+                {
+                    "doi": "10.1/x",
+                    "title": "A microbiome paper",
+                    "abstract": "Abstract",
+                    "authors": ["Author A"],
+                    "year": "2024",
+                    "venue": "Journal",
+                }
+            )
+        assert failed.errors == ["store failed"]
+        assert failed.upsert == UpsertResult("broken", True)
+        assert failed.citation_store is None
 
     def test_pipeline_upsert_runtime_error_skips_citation_storage(self):
         with patch("pipeline.ingestion.parse_input", return_value=ParseResult(None, "10.1/x", None, None, [], None, None)), patch(
@@ -740,21 +920,63 @@ class TestIngestionUnit:
         link.assert_not_called()
 
     def test_pipeline_full_run_existing_dedup_created_false_path(self):
-        with patch("pipeline.ingestion.parse_input", return_value=ParseResult(None, "10.1/x", None, None, [], None, None)), patch(
-            "pipeline.ingestion.resolve_identity", return_value=resolved()
+        node_state = {
+            "existing-id": {
+                "id": "existing-id",
+                "slug": "existing",
+                "metadata": {"reference": {"custom": "keep"}},
+                "tags": ["pipeline:queued", "source:manual"],
+            }
+        }
+
+        def get_node(slug):
+            return node_state[slug]
+
+        def update_node(slug, **kwargs):
+            node_state[slug] = {**node_state[slug], **{k: v for k, v in kwargs.items() if v is not None}}
+            return node_state[slug]
+
+        prefetched = BatchResolved(
+            doi="10.1/x",
+            s2_id="s2-existing",
+            title="Batch title",
+            abstract="Batch abstract",
+            pmid=None,
+            year="2024",
+            venue="Batch Journal",
+            authors=["Author A"],
+            citations=[CitationItem("10.2/y", None, None, "Target", 2020)],
+        )
+        with patch(
+            "pipeline.ingestion.trellis.find_by_s2id", return_value={"id": "existing-id"}
+        ) as find_by_s2id, patch("pipeline.ingestion.trellis.find_by_doi") as find_by_doi, patch(
+            "pipeline.ingestion.trellis.get_node", side_effect=get_node
+        ) as get_node_mock, patch(
+            "pipeline.ingestion.trellis.update_node", side_effect=update_node
+        ) as update, patch(
+            "pipeline.ingestion.trellis.annotate_node"
         ), patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult({"slug": "existing"}, "doi")
-        ), patch("pipeline.ingestion.upsert_node", return_value=UpsertResult("existing", False)), patch(
-            "pipeline.ingestion.fetch_outbound_citations", return_value=citation_result()
-        ), patch("pipeline.ingestion.store_citations", return_value=ingestion.CitationStoreResult(0)), patch(
-            "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(0, 0)
+            "pipeline.ingestion.trellis.build_node_index", return_value={"by_doi": {}}
         ), patch(
-            "pipeline.ingestion.verify_outcome", return_value=ingestion.VerifyResult(True, True, "scaffolded", 0)
+            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=None
+        ), patch(
+            "pipeline.ingestion.trellis.grep_nodes", return_value=[]
         ):
-            outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"})
+            outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"}, prefetched=prefetched)
+
         assert outcome.errors == []
         assert outcome.upsert.created is False
-        assert outcome.upsert.slug == "existing"
+        assert outcome.upsert.slug == "existing-id"
+        find_by_s2id.assert_called_once_with("s2-existing")
+        find_by_doi.assert_not_called()
+        assert get_node_mock.call_count == 3
+        assert update.call_args_list[0].args[0] == "existing-id"
+        assert update.call_args_list[0].kwargs["metadata"]["reference"]["custom"] == "keep"
+        assert "pipeline:queued" not in update.call_args_list[0].kwargs["tags"]
+        assert "pipeline:scaffolded" in update.call_args_list[0].kwargs["tags"]
+        assert "source:manual" in update.call_args_list[0].kwargs["tags"]
+        assert update.call_args_list[1].args[0] == "existing-id"
+        assert outcome.citation_store == ingestion.CitationStoreResult(1)
 
     def test_pipeline_does_not_create_stub_nodes_for_unresolved_citations(self):
         citations = citation_result(

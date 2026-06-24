@@ -303,25 +303,6 @@ def update_node(
     return _unwrap_node(_run_json(*args))
 
 
-def add_child_node(
-    node_type: str,
-    title: str,
-    description: str = None,
-    parent: str = None,
-    tags: list[str] = None,
-    actor_id: str = ACTOR,
-) -> dict:
-    args = ["add", node_type, title]
-    if description:
-        args += ["--description", description]
-    if parent:
-        args += ["--parent", parent]
-    if tags:
-        args += ["--tags", ",".join(tags)]
-    args += ["--actor-id", actor_id, "--json"]
-    return _unwrap_node(_run_json(*args))
-
-
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
 
 
@@ -440,7 +421,6 @@ def find_by_doi(doi: str) -> Optional[dict]:
 def reverse_materialize(
     new_slug: str,
     doi: str = None,
-    s2_id: str = None,
     index: dict = None,
 ) -> int:
     """

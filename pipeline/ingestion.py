@@ -454,6 +454,9 @@ def _fill_from_s2(fields: dict) -> str:
     except ValueError:
         return fields["source"]
 
+    if not isinstance(payload, dict):
+        return fields["source"]
+
     external_ids = payload.get("externalIds") or {}
     authors = [a.get("name") for a in payload.get("authors") or [] if a.get("name")]
     fields.update(
@@ -761,8 +764,8 @@ def link_citations(slug: str, citations: CitationResult, index: dict = None) -> 
         if not target:
             skipped += 1
             continue
-        # Prefer UUID to avoid ambiguous-slug errors in trellis link
-        target_slug = target.get("id") or _node_slug(target)
+        # Prefer stable identifiers to avoid ambiguous-slug errors in trellis link
+        target_slug = target.get("id") or target.get("uuid") or _node_slug(target)
         if not target_slug:
             skipped += 1
             continue
@@ -1076,7 +1079,6 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
             trellis.reverse_materialize(
                 slug,
                 doi=(resolved.doi if resolved else None) or citation_doi,
-                s2_id=resolved.s2_id if resolved else None,
                 index=index,
             )
         except Exception as e:

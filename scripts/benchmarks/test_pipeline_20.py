@@ -7,10 +7,10 @@ from datetime import date
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pipeline.trellis import find_nodes, get_node
 from pipeline.ingestion import ingest_reference_pipeline
@@ -111,6 +111,7 @@ def run():
     slugs = {r["slug"] for r in results if r["slug"]}
     print(f"\n  Checking cross-links among the {len(slugs)} processed nodes...")
     cross = 0
+    cross_failures = 0
     for r in results:
         if not r["slug"]:
             continue
@@ -123,10 +124,12 @@ def run():
                 if any(item_doi == rd for rd in DOIS if rd != r["doi"]):
                     cross += 1
                     print(f"    {r['slug']} → cites a peer in our batch (doi: {item_doi})")
-        except Exception:
-            pass
+        except Exception as exc:
+            cross_failures += 1
+            print(f"    ERROR checking cross-links for {r['slug']} ({r['doi']}): {exc!r}")
 
     print(f"\n  Cross-citations within batch: {cross}")
+    print(f"  Cross-link check failures: {cross_failures}")
     print(f"  No-stub check: queued delta = {queued_after - queued_before} (expected 0)")
     print(f"\n{'='*60}")
     print("DONE")

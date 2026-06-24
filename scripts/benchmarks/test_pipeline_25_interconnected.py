@@ -10,15 +10,15 @@ from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pipeline.trellis import find_nodes, get_node
 from pipeline.ingestion import format_metrics_table, ingest_batch
 
-_BENCH_LOG_PATH = Path(__file__).resolve().parent / "_bench_log.py"
+_BENCH_LOG_PATH = Path(__file__).resolve().parents[2] / "tests" / "_bench_log.py"
 _BENCH_LOG_SPEC = importlib.util.spec_from_file_location("_bench_log", _BENCH_LOG_PATH)
 _bench_log = importlib.util.module_from_spec(_BENCH_LOG_SPEC)
 _BENCH_LOG_SPEC.loader.exec_module(_bench_log)
@@ -102,6 +102,7 @@ def run():
     slugs = {o.upsert.slug for o in ok if o.upsert and o.upsert.slug}
     lines.append(f"\n  Checking cross-links among {len(slugs)} processed nodes...")
     cross_edges = []
+    cross_failures = 0
     for o in ok:
         if not o.upsert or not o.upsert.slug:
             continue
@@ -113,10 +114,13 @@ def run():
                 item_doi = (item.get("doi") or "").lower()
                 if any(item_doi == d.lower() for d in DOIS if d.lower() != (o.parse.doi or "").lower()):
                     cross_edges.append((o.upsert.slug, item_doi))
-        except Exception:
-            pass
+        except Exception as exc:
+            cross_failures += 1
+            doi = o.parse.doi if o.parse else "?"
+            lines.append(f"    ERROR checking cross-links for {o.upsert.slug} ({doi}): {exc!r}")
 
     lines.append(f"  Cross-citations within batch (in metadata): {len(cross_edges)}")
+    lines.append(f"  Cross-link check failures: {cross_failures}")
     if cross_edges:
         for src, tgt in cross_edges[:10]:
             lines.append(f"    {src[:50]} → {tgt}")
@@ -141,6 +145,7 @@ def run():
         "edges_linked": total_linked,
         "edges_skipped": total_skipped,
         "cross_citations": len(cross_edges),
+        "cross_link_failures": cross_failures,
         "elapsed_seconds": round(elapsed, 2),
         "per_paper_seconds": round(elapsed / len(DOIS), 2),
     }

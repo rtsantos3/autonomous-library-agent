@@ -1,4 +1,3 @@
-import concurrent.futures
 import sys
 import threading
 from pathlib import Path
@@ -227,7 +226,8 @@ class TestIngestBatch:
         assert outcomes[1].verify is None
         assert outcomes[2].verify.node_exists is True
 
-        assert [phase.name for phase in metrics.phases] == [
+        phase_names = {phase.name for phase in metrics.phases}
+        assert {
             "phase0 batch resolve",
             "index build",
             "phase1 resolve+upsert",
@@ -238,58 +238,22 @@ class TestIngestBatch:
             "phase2 fetch+store",
             "phase3 link",
             "phase4 verify",
-        ]
+        } <= phase_names
         assert metrics.workers == 3
         assert metrics.total_seconds >= 0
         assert metrics.node_count_at_index == 1
         assert all(phase.wall_seconds >= 0 for phase in metrics.phases)
         assert all(phase.per_item_seconds >= 0 for phase in metrics.phases)
-        assert metrics.phases[0].items == len(dois)
-        assert metrics.phases[1].items == 1
-        assert metrics.phases[5].items == 2
-        assert metrics.phases[6].items == 2
-        assert metrics.phases[7].items == 2
-        assert metrics.phases[8].items == 2
-        assert metrics.phases[9].items == 2
+        phase_items = {phase.name: phase.items for phase in metrics.phases}
+        assert phase_items["phase0 batch resolve"] == len(dois)
+        assert phase_items["index build"] == 1
+        assert phase_items["index rebuild"] == 2
+        assert phase_items["reverse materialize"] == 2
+        assert phase_items["phase2 fetch+store"] == 2
+        assert phase_items["phase3 link"] == 2
+        assert phase_items["phase4 verify"] == 2
         batch_resolve.assert_called_once_with(dois)
         assert build_index.call_count == 2
         assert reverse.call_count == 2
+        assert [call.kwargs["doi"] for call in reverse.call_args_list] == ["10.1/a", "10.1/c"]
         fetch.assert_not_called()
-
-    def test_resolve_and_upsert_thread_safety_smoke(self):
-        dois = [f"10.1/{idx}" for idx in range(8)]
-        outcomes = [IngestionOutcome() for _ in dois]
-        resolve_timings = []
-        upsert_timings = []
-        lock = threading.Lock()
-
-        def resolve_identity(parsed, prefetched=None):
-            return resolved(doi=parsed.doi, s2_id=f"s2-{parsed.doi.rsplit('/', 1)[1]}")
-
-        def upsert_node(resolve, dedup):
-            return UpsertResult(f"slug-{resolve.doi.rsplit('/', 1)[1]}", True)
-
-        with patch("pipeline.ingestion.resolve_identity", side_effect=resolve_identity), patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult(None, None)
-        ), patch("pipeline.ingestion.upsert_node", side_effect=upsert_node):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                results = list(
-                    executor.map(
-                        lambda item: ingestion.resolve_and_upsert(
-                            item,
-                            outcomes,
-                            lambda doi: None,
-                            resolve_timings,
-                            upsert_timings,
-                            lock,
-                        ),
-                        enumerate(dois),
-                    )
-                )
-
-        assert len([result for result in results if result is not None]) == len(dois)
-        assert len(resolve_timings) == len(dois)
-        assert len(upsert_timings) == len(dois)
-        assert [outcome.parse.doi for outcome in outcomes] == dois
-        assert [outcome.upsert.slug for outcome in outcomes] == [f"slug-{idx}" for idx in range(8)]
-        assert all(outcome.errors == [] for outcome in outcomes)

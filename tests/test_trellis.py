@@ -12,7 +12,6 @@ from pipeline import trellis
 
 UUID_SOURCE = "11111111-1111-1111-1111-111111111111"
 UUID_TARGET = "22222222-2222-2222-2222-222222222222"
-UUID_SELF = "33333333-3333-3333-3333-333333333333"
 
 
 def test_norm_title_normalizes_unicode_whitespace_case_and_trailing_periods():
@@ -183,40 +182,97 @@ def test_find_by_title_normalizes_query_and_requires_exact_normalized_match():
         assert trellis.find_by_title("short") is None
 
 
-def test_reverse_materialize_links_waiting_sources_for_matching_pending_doi():
+def test_get_by_pipeline_status_uses_explicit_backfill_limit():
+    expected = [{"slug": "paper"}]
+
+    with patch("pipeline.trellis.find_nodes", return_value=expected) as find:
+        result = trellis.get_by_pipeline_status("scaffolded")
+
+    assert result is expected
+    find.assert_called_once_with(tag="pipeline:scaffolded", limit=5000)
+
+
+def test_reverse_materialize_counts_successful_and_idempotent_links_only():
     index = {
         "pending_citations": {
             "10.9/target": [
                 (UUID_SOURCE, {"slug": "source-paper"}),
-                (UUID_TARGET, {"slug": "self-paper"}),
-                (None, {"slug": "bad-paper"}),
+                ("source-two", {"slug": "source-two-paper"}),
+                ("source-three", {"slug": "source-three-paper"}),
             ]
         }
     }
 
-    with patch("pipeline.trellis._run", return_value=json.dumps({"ok": True})) as run:
+    with patch(
+        "pipeline.trellis.link_nodes",
+        side_effect=[
+            {"ok": True},
+            {"ok": True, "idempotent": True},
+            {"ok": False, "error": "failed"},
+        ],
+    ) as link:
+        created = trellis.reverse_materialize(UUID_TARGET, doi="https://doi.org/10.9/TARGET", index=index)
+
+    assert created == 2
+    link.assert_has_calls(
+        [
+            call(UUID_SOURCE, UUID_TARGET, "references"),
+            call("source-two", UUID_TARGET, "references"),
+            call("source-three", UUID_TARGET, "references"),
+        ]
+    )
+
+
+def test_reverse_materialize_skips_self_links_and_missing_waiting_sources():
+    index = {
+        "pending_citations": {
+            "10.9/target": [
+                (UUID_TARGET, {"slug": "self-paper"}),
+                (None, {"slug": "bad-paper"}),
+                (UUID_SOURCE, {"slug": "source-paper"}),
+            ]
+        }
+    }
+
+    with patch("pipeline.trellis.link_nodes", return_value={"ok": True}) as link:
         created = trellis.reverse_materialize(UUID_TARGET, doi="https://doi.org/10.9/TARGET", index=index)
 
     assert created == 1
-    run.assert_called_once_with(
-        "link",
-        "--source-uuid",
-        UUID_SOURCE,
-        "--target-uuid",
-        UUID_TARGET,
-        "--relationship",
-        "references",
-        "--actor-id",
-        trellis.ACTOR,
-        "--json",
+    link.assert_called_once_with(UUID_SOURCE, UUID_TARGET, "references")
+
+
+def test_reverse_materialize_links_multiple_waiting_sources_for_same_doi_key():
+    index = {
+        "pending_citations": {
+            "10.9/target": [
+                (UUID_SOURCE, {"slug": "source-paper"}),
+                ("source-two", {"slug": "source-two-paper"}),
+            ]
+        }
+    }
+
+    with patch("pipeline.trellis.link_nodes", return_value={"ok": True}) as link:
+        created = trellis.reverse_materialize(UUID_TARGET, doi="doi:10.9/TARGET", index=index)
+
+    assert created == 2
+    link.assert_has_calls(
+        [
+            call(UUID_SOURCE, UUID_TARGET, "references"),
+            call("source-two", UUID_TARGET, "references"),
+        ]
     )
 
 
 def test_reverse_materialize_returns_zero_without_index_or_valid_doi():
-    with patch("pipeline.trellis._run", side_effect=AssertionError):
+    with patch("pipeline.trellis.link_nodes", side_effect=AssertionError):
         assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index=None) == 0
+        assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index={}) == 0
+        assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index={"by_doi": {}}) == 0
         assert trellis.reverse_materialize(UUID_TARGET, doi="", index={"pending_citations": {}}) == 0
+        assert trellis.reverse_materialize(UUID_TARGET, doi="not-a-doi", index={"pending_citations": {}}) == 0
         assert trellis.reverse_materialize("", doi="10.1/x", index={"pending_citations": {}}) == 0
+        with patch("pipeline.trellis._doi_key", return_value=None):
+            assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index={"pending_citations": {}}) == 0
 
 
 def test_set_pipeline_status_rejects_unknown_status_before_subprocess():

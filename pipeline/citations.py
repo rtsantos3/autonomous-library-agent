@@ -66,9 +66,21 @@ def fetch_outbound_citations(doi: str) -> CitationResult:
         logger.warning("fetch_outbound_citations doi=%s json decode failed: %s", doi, exc)
         return _empty_result("semantic-scholar-failed")
 
+    if not isinstance(payload, dict):
+        return _empty_result("semantic-scholar-failed")
+    data = payload.get("data")
+    if data is None:
+        data = []
+    if not isinstance(data, list):
+        return _empty_result("semantic-scholar-failed")
+
     items: list[CitationItem] = []
-    for item in payload.get("data") or []:
+    for item in data:
+        if not isinstance(item, dict):
+            continue
         cited = (item or {}).get("citedPaper") or {}
+        if not isinstance(cited, dict):
+            continue
         external_ids = cited.get("externalIds") or {}
         title = (cited.get("title") or "").strip()
         cited_doi = _normalize_doi(external_ids.get("DOI"))

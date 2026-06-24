@@ -92,6 +92,18 @@ def test_batch_resolve_unusable_dict_payload_skips_chunk_and_logs_warning(caplog
     assert "returned unusable dict payload" in caplog.text
 
 
+@pytest.mark.parametrize("payload", [{"data": None}, {"data": {}}, {"data": "bad"}])
+def test_batch_resolve_dict_payload_missing_list_data_skips_chunk(payload):
+    with patch("pipeline.aggregator.http_post", return_value=Response(payload)):
+        assert batch_resolve(["10.1/input"]) == {}
+
+
+@pytest.mark.parametrize("entry", [[], "bad entry", {"authors": ["bad author"]}, {"references": ["bad ref"]}])
+def test_batch_resolve_malformed_entries_are_skipped_gracefully(entry):
+    with patch("pipeline.aggregator.http_post", return_value=Response([entry])):
+        assert batch_resolve(["10.1/input"]) == {}
+
+
 @pytest.mark.parametrize("payload", ["bad", 123, object()])
 def test_batch_resolve_non_list_non_dict_payload_skips_chunk(payload):
     with patch("pipeline.aggregator.http_post", return_value=Response(payload)):
