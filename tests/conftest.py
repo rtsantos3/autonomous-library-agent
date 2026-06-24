@@ -28,11 +28,15 @@ def ephemeral_trellis(tmp_path, monkeypatch):
     except (FileNotFoundError, subprocess.CalledProcessError):
         pytest.skip("trellis not available")
 
-    from pipeline import trellis as trellis_mod
-
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("TRELLIS_WORKSPACE", str(workspace))
+
+    # Import only after TRELLIS_WORKSPACE is set, so pipeline.trellis's
+    # import-time PROJECT_ROOT (the back-compat constant) can never freeze to the
+    # live workspace from inside this fixture. Runtime calls resolve _workspace()
+    # per-call, but this keeps the fixture honest as defense-in-depth.
+    from pipeline import trellis as trellis_mod
 
     def _run(*args):
         return subprocess.run(
@@ -48,7 +52,12 @@ def ephemeral_trellis(tmp_path, monkeypatch):
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.option.markexpr == "integration":
+    # Skip integration tests by default, but back off whenever the user's -m
+    # expression references "integration" at all (e.g. "integration",
+    # "integration and not slow", "not integration"). In those cases pytest's
+    # own marker selection already includes/excludes them correctly; an
+    # exact-string match would mis-skip every form except bare "integration".
+    if "integration" in (config.option.markexpr or ""):
         return
     skip_integration = pytest.mark.skip(reason="integration test; run with -m integration")
     for item in items:
