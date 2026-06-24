@@ -180,6 +180,36 @@ class TestBatchWorkers:
         assert result is None
         assert outcomes[0].errors == ["verify failed"]
 
+    def test_reverse_materialize_upserted_uses_resolved_doi(self):
+        outcomes = [IngestionOutcome(resolve=resolved(doi="10.1/resolved"))]
+        index = {"by_doi": {}}
+
+        with patch("pipeline.ingestion.trellis.reverse_materialize") as reverse:
+            result = ingestion.reverse_materialize_upserted((0, "10.1/citation", "source"), outcomes, index)
+
+        assert result is None
+        assert outcomes[0].errors == []
+        reverse.assert_called_once_with("source", doi="10.1/resolved", index=index)
+
+    def test_reverse_materialize_upserted_captures_error_on_item(self):
+        outcomes = [IngestionOutcome(resolve=resolved(doi=None)), IngestionOutcome(resolve=resolved(doi="10.1/ok"))]
+        index = {"by_doi": {}}
+
+        def reverse(slug, **kwargs):
+            if slug == "bad":
+                raise RuntimeError("reverse failed")
+
+        with patch("pipeline.ingestion.trellis.reverse_materialize", side_effect=reverse) as reverse_materialize:
+            ingestion.reverse_materialize_upserted((0, "10.1/fallback", "bad"), outcomes, index)
+            ingestion.reverse_materialize_upserted((1, "10.1/citation", "ok"), outcomes, index)
+
+        assert outcomes[0].errors == ["reverse failed"]
+        assert outcomes[1].errors == []
+        assert [call.kwargs["doi"] for call in reverse_materialize.call_args_list] == [
+            "10.1/fallback",
+            "10.1/ok",
+        ]
+
 
 class TestIngestBatch:
     def test_ingest_batch_orchestrates_phases_and_isolates_item_failure(self):
@@ -260,7 +290,7 @@ class TestIngestBatch:
         batch_resolve.assert_called_once_with(dois)
         assert build_index.call_count == 2
         assert reverse.call_count == 2
-        assert [call.kwargs["doi"] for call in reverse.call_args_list] == ["10.1/a", "10.1/c"]
+        assert sorted(call.kwargs["doi"] for call in reverse.call_args_list) == ["10.1/a", "10.1/c"]
         fetch.assert_not_called()
 
     def test_ingest_batch_phase1_dedup_uses_index_not_subprocess_chain(self):

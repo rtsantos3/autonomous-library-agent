@@ -641,21 +641,37 @@ class TestIngestionUnit:
     def test_link_creates_edge_for_existing_target(self):
         citations = citation_result([CitationItem("10.2/y", None, "s2", "Target", 2020)])
         with patch("pipeline.ingestion.trellis.dedup_check", return_value={"slug": "target"}), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"
+        ) as resolve_source, patch(
             "pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}
         ) as link:
+            result = ingestion.link_citations("source", citations)
+        assert result.linked == 1
+        resolve_source.assert_called_once_with("source")
+        link.assert_called_once_with("source-id", "target", "references")
+
+    def test_link_falls_back_to_slug_when_source_resolution_fails(self):
+        citations = citation_result([CitationItem("10.2/y", None, "s2", "Target", 2020)])
+        with patch("pipeline.ingestion.trellis.dedup_check", return_value={"slug": "target"}), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value=None
+        ), patch("pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}) as link:
             result = ingestion.link_citations("source", citations)
         assert result.linked == 1
         link.assert_called_once_with("source", "target", "references")
 
     def test_link_skips_missing_target(self):
         citations = citation_result([CitationItem("10.2/y", None, None, "Target", 2020)])
-        with patch("pipeline.ingestion.trellis.dedup_check", return_value=None):
+        with patch("pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"), patch(
+            "pipeline.ingestion.trellis.dedup_check", return_value=None
+        ):
             result = ingestion.link_citations("source", citations)
         assert result.skipped == 1
 
     def test_link_idempotent_on_duplicate(self):
         citations = citation_result([CitationItem("10.2/y", None, "s2", "Target", 2020)])
         with patch("pipeline.ingestion.trellis.dedup_check", return_value={"slug": "target"}), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"
+        ), patch(
             "pipeline.ingestion.trellis.link_nodes", return_value={"ok": True, "idempotent": True}
         ):
             result = ingestion.link_citations("source", citations)
@@ -664,6 +680,8 @@ class TestIngestionUnit:
     def test_link_nodes_error_result_counts_as_skipped(self):
         citations = citation_result([CitationItem("10.2/y", None, "s2", "Target", 2020)])
         with patch("pipeline.ingestion.trellis.dedup_check", return_value={"slug": "target"}), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"
+        ), patch(
             "pipeline.ingestion.trellis.link_nodes", return_value={"ok": False, "error": "boom"}
         ):
             result = ingestion.link_citations("source", citations)
@@ -680,6 +698,8 @@ class TestIngestionUnit:
         )
         targets = [{"slug": "a"}, {"slug": "b"}, None]
         with patch("pipeline.ingestion.trellis.dedup_check", side_effect=targets), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"
+        ), patch(
             "pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}
         ):
             result = ingestion.link_citations("source", citations)
@@ -688,7 +708,9 @@ class TestIngestionUnit:
 
     def test_link_s2_only_citation_calls_dedup_with_s2id_only(self):
         citations = citation_result([CitationItem(doi=None, pmid=None, s2_id="s2-only", title="", year=None)])
-        with patch("pipeline.ingestion.trellis.dedup_check", return_value=None) as dedup:
+        with patch("pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"), patch(
+            "pipeline.ingestion.trellis.dedup_check", return_value=None
+        ) as dedup:
             result = ingestion.link_citations("source", citations)
         dedup.assert_called_once_with(s2id="s2-only", doi=None, pmid=None, title="")
         assert result.skipped == 1
@@ -711,16 +733,19 @@ class TestIngestionUnit:
         index = {"by_doi": {}}
         with patch("pipeline.ingestion.trellis.dedup_check_indexed", side_effect=targets) as indexed, patch(
             "pipeline.ingestion.trellis.dedup_check"
-        ) as subprocess_dedup, patch("pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}) as link:
+        ) as subprocess_dedup, patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"
+        ) as resolve_source, patch("pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}) as link:
             result = ingestion.link_citations("source", citations, index=index)
 
         assert result == ingestion.LinkResult(linked=3, skipped=1)
         assert indexed.call_count == 4
         subprocess_dedup.assert_not_called()
+        resolve_source.assert_called_once_with("source")
         assert [call.args for call in link.call_args_list] == [
-            ("source", "target-id", "references"),
-            ("source", "uuid-only", "references"),
-            ("source", "slug-only", "references"),
+            ("source-id", "target-id", "references"),
+            ("source-id", "uuid-only", "references"),
+            ("source-id", "slug-only", "references"),
         ]
 
     # verify_outcome
@@ -869,6 +894,7 @@ class TestIngestionUnit:
             "get:source-slug",
             "update:source-slug:True",
             "get:source-slug",
+            "get:source-slug",
         ]
         assert update.call_args_list[0].args[0] == "source-slug"
         stored = update.call_args_list[0].kwargs["metadata"]["reference"]["outbound_citations"]["items"]
@@ -880,7 +906,7 @@ class TestIngestionUnit:
             pmid="456",
             title="Existing target paper",
         )
-        link.assert_called_once_with("source-slug", "target-id", "references")
+        link.assert_called_once_with("source-id", "target-id", "references")
         add.assert_called_once()
         annotate.assert_called_once()
         grep_nodes.assert_not_called()
@@ -982,7 +1008,7 @@ class TestIngestionUnit:
         assert outcome.upsert.slug == "existing-id"
         find_by_s2id.assert_called_once_with("s2-existing")
         find_by_doi.assert_not_called()
-        assert get_node_mock.call_count == 3
+        assert get_node_mock.call_count == 4
         assert update.call_args_list[0].args[0] == "existing-id"
         assert update.call_args_list[0].kwargs["metadata"]["reference"]["custom"] == "keep"
         assert "pipeline:queued" not in update.call_args_list[0].kwargs["tags"]

@@ -765,6 +765,7 @@ def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult
 def link_citations(slug: str, citations: CitationResult, index: dict = None) -> LinkResult:
     linked = 0
     skipped = 0
+    source_ref = slug if trellis._is_uuid(slug) else (trellis._resolve_to_uuid(slug) or slug)
     for item in citations.items:
         if index is not None:
             target = trellis.dedup_check_indexed(
@@ -789,7 +790,7 @@ def link_citations(slug: str, citations: CitationResult, index: dict = None) -> 
         if not target_slug:
             skipped += 1
             continue
-        result = trellis.link_nodes(slug, target_slug, "references")
+        result = trellis.link_nodes(source_ref, target_slug, "references")
         if result.get("ok"):
             linked += 1
         else:
@@ -934,6 +935,21 @@ def link_stored(
     except Exception as e:
         outcome.errors.append(str(e))
         return None
+
+
+def reverse_materialize_upserted(
+    item: tuple[int, str, str],
+    outcomes: list[IngestionOutcome],
+    index: dict,
+) -> None:
+    idx, citation_doi, slug = item
+    outcome = outcomes[idx]
+    try:
+        resolved = outcome.resolve
+        doi = (resolved.doi if resolved else None) or citation_doi
+        trellis.reverse_materialize(slug, doi=doi, index=index)
+    except Exception as e:
+        outcome.errors.append(str(e))
 
 
 def verify_upserted(
@@ -1097,17 +1113,8 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
     add_phase("index rebuild", elapsed, len(index))
 
     t0 = time.perf_counter()
-    for idx, citation_doi, slug in upserted:
-        outcome = outcomes[idx]
-        try:
-            resolved = outcome.resolve
-            trellis.reverse_materialize(
-                slug,
-                doi=(resolved.doi if resolved else None) or citation_doi,
-                index=index,
-            )
-        except Exception as e:
-            outcome.errors.append(str(e))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(lambda item: reverse_materialize_upserted(item, outcomes, index), upserted))
     elapsed = time.perf_counter() - t0
     add_phase("reverse materialize", elapsed, len(upserted))
 
