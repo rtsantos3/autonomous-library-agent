@@ -167,7 +167,10 @@ def grep_nodes(query: str) -> list[dict]:
 
 
 def get_by_pipeline_status(status: str) -> list[dict]:
-    return find_nodes(tag=f"pipeline:{status}")
+    # `trellis find` defaults to a 100-row cap; without an explicit limit a full
+    # backfill scan would silently see only the first 100 matching nodes. Match
+    # the bound used by build_node_index so the whole status cohort is returned.
+    return find_nodes(tag=f"pipeline:{status}", limit=5000)
 
 
 # ---------------------------------------------------------------------------

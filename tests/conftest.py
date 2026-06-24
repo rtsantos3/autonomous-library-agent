@@ -15,8 +15,13 @@ def ephemeral_trellis(tmp_path, monkeypatch):
     Integration tests must not touch the live library graph. This points the
     pipeline's workspace (resolved per-call via TRELLIS_WORKSPACE) at a fresh,
     empty instance, seeds the parent project node that upsert_node parents
-    references under, and yields the workspace path. pytest's tmp_path teardown
-    deletes the whole instance, and monkeypatch restores the env var.
+    references under, and yields the workspace path.
+
+    Isolation is restored two ways: monkeypatch reverts TRELLIS_WORKSPACE the
+    moment the test ends, and the instance lives under tmp_path. The throwaway
+    .trellis directory is not deleted immediately on teardown — pytest keeps the
+    last N runs (tmp_path_retention_count=2 in pytest.ini) and garbage-collects
+    older ones, so a recent failure's graph stays inspectable.
     """
     try:
         subprocess.run(["trellis", "--help"], capture_output=True, text=True, check=True)
