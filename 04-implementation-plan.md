@@ -200,3 +200,57 @@ rss:
       label: pubmed_microbiome
   poll_interval_hours: 6
 ```
+
+---
+
+## Long-Term Plans
+
+Deferred work, not started. Gated behind finishing materialization (the
+backfill that digests the scaffolded library into the Trellis graph). Recorded
+here so the design seam is not lost.
+
+### RIS ingestion pipeline (reference-manager interoperability)
+
+**Intent.** Make RIS the canonical input format so the pipeline networks cleanly
+with Zotero, Mendeley, EndNote, and Papers — all of which export RIS. A user
+exports their library to `.ris` and feeds it in to generate a citation-graph /
+RAG backbone in Trellis. Trellis is the sink; RIS is the front door.
+
+**Architecture.**
+```
+library.ris -> ris_adapter -> normalized refs -> ingest_batch -> Trellis nodes + edges
+              (parse + map)   [{doi,pmid,title,  (resolve -> dedup
+                               year,venue,authors, -> enrich -> link
+                               abstract,kw,type}]  -> state machine)
+```
+
+**What already exists.** `scripts/import_ris_network.py:parse_ris_text` is a
+working RIS parser (tag regex, `ER` record flush, continuation lines, full field
+mapping: T1/TI, AB/N2, DO/M3, PY/Y1/DA, JO/T2/J2, AU, KW, UR). It currently
+feeds the *old* scaffold lineage (`scripts/ingest.py`), not the new
+`pipeline/ingestion.py` state machine.
+
+**Work to do (refactor, engine unchanged).**
+- Lift `parse_ris_text` into a first-class input adapter under `pipeline/` that
+  emits normalized reference dicts consumed by `ingest_batch`.
+- Collapse the two lineages so RIS records get a first-class path to
+  `pipeline:digested` instead of stopping at `scaffolded`.
+- Map RIS `TY` types (`JOUR`, `BOOK`, `CHAP`, `CONF`, ...) to the canonical
+  `type:*` slugs via the same `pub_type_slug` / `canonical_type_tag` path.
+
+**Open design points.**
+- *DOI-keying gap.* The pipeline resolves/enriches by DOI; RIS from reference
+  managers is frequently DOI-less (books, theses, older or hand-entered items).
+  The adapter needs a title/author resolve step (S2/Crossref) to recover a DOI
+  before digestion; no match -> scaffold-only (`needs-review`), never digested.
+- *Format scope.* RIS first (most universally GUI-exported). CSL-JSON and
+  BibTeX adapters can follow on the same seam if needed.
+
+### Other deferred items
+- Type-tag cleanup on already-digested nodes: source path and re-ingestion now
+  self-heal the camelCase `type:journalarticle` duplication; the ~1.2k
+  already-`digested` nodes keep harmless duplicate tags.
+  `scripts/migrations/canonicalize_type_tags.py --apply` cleans them if pristine
+  facets are wanted.
+- Slug normalization for `case-reports` (plural) vs `casereport`, and S2's
+  combined `lettersandcomments` category, which have no clean PubMed twin.
