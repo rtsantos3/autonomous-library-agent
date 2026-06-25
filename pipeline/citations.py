@@ -4,6 +4,7 @@ citations.py - Outbound citation retrieval from Semantic Scholar.
 LLM-independent. Returns raw structured data from the S2 API only.
 No Trellis interaction.
 """
+
 from __future__ import annotations
 
 import logging
@@ -14,7 +15,7 @@ from typing import Optional
 
 import requests
 
-from pipeline._http import http_get, S2_LIMITER
+from pipeline._http import S2_LIMITER, http_get
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,9 @@ class CitationResult:
 
 
 def _empty_result(source: str = "semantic-scholar") -> CitationResult:
-    return CitationResult(source=source, retrieved_at=date.today().isoformat(), items=[])
+    return CitationResult(
+        source=source, retrieved_at=date.today().isoformat(), items=[]
+    )
 
 
 def _normalize_doi(doi: Optional[str]) -> Optional[str]:
@@ -57,13 +60,17 @@ def fetch_outbound_citations(doi: str) -> CitationResult:
         headers["x-api-key"] = api_key
 
     try:
-        response = http_get(url, params=params, headers=headers, limiter=S2_LIMITER, timeout=30)
+        response = http_get(
+            url, params=params, headers=headers, limiter=S2_LIMITER, timeout=30
+        )
         payload = response.json()
     except requests.RequestException as exc:
         logger.warning("fetch_outbound_citations doi=%s request failed: %s", doi, exc)
         return _empty_result("semantic-scholar-failed")
     except ValueError as exc:
-        logger.warning("fetch_outbound_citations doi=%s json decode failed: %s", doi, exc)
+        logger.warning(
+            "fetch_outbound_citations doi=%s json decode failed: %s", doi, exc
+        )
         return _empty_result("semantic-scholar-failed")
 
     if not isinstance(payload, dict):

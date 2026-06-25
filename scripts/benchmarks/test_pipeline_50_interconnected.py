@@ -3,12 +3,14 @@ Integration test: 50 foundational interconnected microbiome papers (2005-2013).
 Uses ingest_batch() for parallelized processing.
 Reports cross-links materialized.
 """
+
 import sys
 import time
 from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
@@ -126,12 +128,18 @@ def run():
             items = (meta.get("outbound_citations") or {}).get("items") or []
             for item in items:
                 item_doi = (item.get("doi") or "").lower()
-                if any(item_doi == d.lower() for d in DOIS if d.lower() != (o.parse.doi or "").lower()):
+                if any(
+                    item_doi == d.lower()
+                    for d in DOIS
+                    if d.lower() != (o.parse.doi or "").lower()
+                ):
                     cross_edges.append((o.upsert.slug, item_doi))
         except Exception as exc:
             cross_failures += 1
             doi = o.parse.doi if o.parse else "?"
-            print(f"    ERROR checking cross-links for {o.upsert.slug} ({doi}): {exc!r}")
+            print(
+                f"    ERROR checking cross-links for {o.upsert.slug} ({doi}): {exc!r}"
+            )
 
     print(f"  Cross-citations within batch (in metadata): {len(cross_edges)}")
     print(f"  Cross-link check failures: {cross_failures}")

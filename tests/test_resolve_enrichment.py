@@ -1,15 +1,15 @@
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
-import xml.etree.ElementTree as ET
 
 import pytest
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline import ingestion
-from pipeline.aggregator import BatchResolved
+from pipeline import ingestion  # noqa: E402
+from pipeline.aggregator import BatchResolved  # noqa: E402
 
 
 class Response:
@@ -118,7 +118,9 @@ def test_fill_from_crossref_request_failure_returns_prior_source_unchanged():
     data = fields(source="semantic-scholar")
     before = dict(data)
 
-    with patch("pipeline.ingestion.http_get", side_effect=requests.RequestException("boom")):
+    with patch(
+        "pipeline.ingestion.http_get", side_effect=requests.RequestException("boom")
+    ):
         source = ingestion._fill_from_crossref(data)
 
     assert source == "semantic-scholar"
@@ -149,15 +151,24 @@ def test_fill_from_crossref_missing_message_does_not_crash():
 
 
 def test_crossref_year_uses_published_first():
-    assert ingestion._crossref_year({"published": {"date-parts": [[2025, 1, 2]]}}) == "2025"
+    assert (
+        ingestion._crossref_year({"published": {"date-parts": [[2025, 1, 2]]}})
+        == "2025"
+    )
 
 
 def test_crossref_year_uses_published_print_when_published_missing():
-    assert ingestion._crossref_year({"published-print": {"date-parts": [["2024"]]}}) == "2024"
+    assert (
+        ingestion._crossref_year({"published-print": {"date-parts": [["2024"]]}})
+        == "2024"
+    )
 
 
 def test_crossref_year_uses_published_online_when_other_dates_missing():
-    msg = {"published": {"date-parts": [[]]}, "published-online": {"date-parts": [[2023]]}}
+    msg = {
+        "published": {"date-parts": [[]]},
+        "published-online": {"date-parts": [[2023]]},
+    }
 
     assert ingestion._crossref_year(msg) == "2023"
 
@@ -222,7 +233,9 @@ def test_fill_from_pubmed_malformed_xml_returns_prior_source_unchanged():
     data = fields(doi=None, source="semantic-scholar")
     before = dict(data)
 
-    with patch("pipeline.ingestion.http_get", return_value=Response(text="<PubmedArticleSet>")):
+    with patch(
+        "pipeline.ingestion.http_get", return_value=Response(text="<PubmedArticleSet>")
+    ):
         source = ingestion._fill_from_pubmed(parsed, data)
 
     assert source == "semantic-scholar"
@@ -302,7 +315,9 @@ def test_resolve_identity_prefetched_pubmed_failure_preserves_s2_batch_source():
         citations=[],
     )
 
-    with patch("pipeline.ingestion._pubmed_fetch", side_effect=ET.ParseError("bad xml")):
+    with patch(
+        "pipeline.ingestion._pubmed_fetch", side_effect=ET.ParseError("bad xml")
+    ):
         result = ingestion.resolve_identity(parsed, prefetched=prefetched)
 
     assert result.source == "s2-batch"

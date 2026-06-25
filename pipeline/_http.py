@@ -1,6 +1,6 @@
+import os
 import threading
 import time
-import os
 from typing import Optional
 
 import requests
@@ -44,8 +44,12 @@ def http_get(
             if resp.status_code == 429 or 500 <= resp.status_code < 600:
                 if attempt == last_attempt:
                     resp.raise_for_status()
-                retry_after = _retry_after_seconds(resp) if resp.status_code == 429 else None
-                time.sleep(retry_after if retry_after is not None else _backoff_delay(attempt))
+                retry_after = (
+                    _retry_after_seconds(resp) if resp.status_code == 429 else None
+                )
+                time.sleep(
+                    retry_after if retry_after is not None else _backoff_delay(attempt)
+                )
                 continue
             resp.raise_for_status()
             return resp
@@ -72,12 +76,18 @@ def http_post(
     for attempt in range(max(retries, 1)):
         limiter.wait()
         try:
-            resp = requests.post(url, params=params, json=json_body, headers=headers, timeout=timeout)
+            resp = requests.post(
+                url, params=params, json=json_body, headers=headers, timeout=timeout
+            )
             if resp.status_code == 429 or 500 <= resp.status_code < 600:
                 if attempt == last_attempt:
                     resp.raise_for_status()
-                retry_after = _retry_after_seconds(resp) if resp.status_code == 429 else None
-                time.sleep(retry_after if retry_after is not None else _backoff_delay(attempt))
+                retry_after = (
+                    _retry_after_seconds(resp) if resp.status_code == 429 else None
+                )
+                time.sleep(
+                    retry_after if retry_after is not None else _backoff_delay(attempt)
+                )
                 continue
             resp.raise_for_status()
             return resp

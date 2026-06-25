@@ -4,8 +4,12 @@ from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline import ingestion
-from pipeline.ingestion import CitationStoreResult, IngestionOutcome, LinkResult
+from pipeline import ingestion  # noqa: E402
+from pipeline.ingestion import (  # noqa: E402
+    CitationStoreResult,
+    IngestionOutcome,
+    LinkResult,
+)
 
 
 def node(slug, uri=None, tags=None, metadata=None):
@@ -26,7 +30,9 @@ def make_outcome(linked=0, stored=0, errors=None):
     return out
 
 
-def run_backfill(nodes, ingest_outcomes=None, only_missing=False, statuses=None, chunk_size=100):
+def run_backfill(
+    nodes, ingest_outcomes=None, only_missing=False, statuses=None, chunk_size=100
+):
     # backfill delegates to the same ingest_batch pipeline as fresh instantiation;
     # patch it and capture the DOIs it is handed.
     ingest_outcomes = [] if ingest_outcomes is None else ingest_outcomes
@@ -57,8 +63,13 @@ def run_backfill(nodes, ingest_outcomes=None, only_missing=False, statuses=None,
 
 def test_full_scan_passes_all_doi_nodes_to_ingest_batch_and_aggregates():
     nodes = [node("a", uri="doi:10.1/a"), node("b", uri="doi:10.1/b")]
-    ingest_outcomes = [make_outcome(linked=3, stored=10), make_outcome(linked=2, stored=7)]
-    outcomes, result, ingest_batch, _get_by_status = run_backfill(nodes, ingest_outcomes)
+    ingest_outcomes = [
+        make_outcome(linked=3, stored=10),
+        make_outcome(linked=2, stored=7),
+    ]
+    outcomes, result, ingest_batch, _get_by_status = run_backfill(
+        nodes, ingest_outcomes
+    )
 
     ingest_batch.assert_called_once_with(["10.1/a", "10.1/b"], workers=2)
     assert result.candidates == 2
@@ -102,7 +113,9 @@ def test_outcome_errors_are_isolated_and_not_counted_as_processed():
         make_outcome(linked=4, stored=9),
         make_outcome(errors=["boom"]),
     ]
-    _outcomes, result, _ingest_batch, _get_by_status = run_backfill(nodes, ingest_outcomes)
+    _outcomes, result, _ingest_batch, _get_by_status = run_backfill(
+        nodes, ingest_outcomes
+    )
 
     assert result.processed == 1
     assert result.edges_linked == 4
@@ -143,7 +156,9 @@ def test_backfill_error_counters_split_failed_and_needs_review():
         make_outcome(errors=["Could not resolve a title for the reference"]),
         make_outcome(errors=["database is locked"]),
     ]
-    _outcomes, result, _ingest_batch, _get_by_status = run_backfill(nodes, ingest_outcomes)
+    _outcomes, result, _ingest_batch, _get_by_status = run_backfill(
+        nodes, ingest_outcomes
+    )
 
     assert result.processed == 0
     assert result.failed == 1
@@ -180,7 +195,9 @@ def test_doi_extraction_precedence_uri_before_metadata_before_tag():
     )
 
     assert result.resolvable == 3
-    ingest_batch.assert_called_once_with(["10.uri/a", "10.meta/d", "10.tag/f"], workers=2)
+    ingest_batch.assert_called_once_with(
+        ["10.uri/a", "10.meta/d", "10.tag/f"], workers=2
+    )
 
 
 def test_backfill_scans_default_statuses_unions_and_dedupes_candidates():
@@ -195,8 +212,18 @@ def test_backfill_scans_default_statuses_unions_and_dedupes_candidates():
             node("scaffolded", uri="doi:10.1/scaffolded"),
         ],
         "failed": [
-            {"id": "stable-id", "slug": "failed", "uri": "doi:10.1/failed", "tags": ["pipeline:failed"]},
-            {"id": "stable-id", "slug": "failed-copy", "uri": "doi:10.1/failed-copy", "tags": ["pipeline:failed"]},
+            {
+                "id": "stable-id",
+                "slug": "failed",
+                "uri": "doi:10.1/failed",
+                "tags": ["pipeline:failed"],
+            },
+            {
+                "id": "stable-id",
+                "slug": "failed-copy",
+                "uri": "doi:10.1/failed-copy",
+                "tags": ["pipeline:failed"],
+            },
         ],
         "digested": [
             node("digested", uri="doi:10.1/digested", tags=["pipeline:digested"]),
@@ -214,7 +241,11 @@ def test_backfill_scans_default_statuses_unions_and_dedupes_candidates():
         ["10.1/queued", "10.1/shared", "10.1/scaffolded", "10.1/failed"],
         workers=2,
     )
-    assert [call.args[0] for call in get_by_status.call_args_list] == ["queued", "scaffolded", "failed"]
+    assert [call.args[0] for call in get_by_status.call_args_list] == [
+        "queued",
+        "scaffolded",
+        "failed",
+    ]
 
 
 def test_backfill_accepts_custom_statuses():
@@ -244,12 +275,26 @@ def test_backfill_processes_candidates_in_chunks_and_aggregates():
         node("e", uri="doi:10.1/e"),
     ]
     chunk_results = [
-        ([make_outcome(linked=1, stored=2), make_outcome(linked=3, stored=4)], object()),
-        ([make_outcome(errors=["database is locked"]), make_outcome(linked=5, stored=6)], object()),
-        ([make_outcome(errors=["Could not resolve a title for the reference"])], object()),
+        (
+            [make_outcome(linked=1, stored=2), make_outcome(linked=3, stored=4)],
+            object(),
+        ),
+        (
+            [
+                make_outcome(errors=["database is locked"]),
+                make_outcome(linked=5, stored=6),
+            ],
+            object(),
+        ),
+        (
+            [make_outcome(errors=["Could not resolve a title for the reference"])],
+            object(),
+        ),
     ]
 
-    with patch("pipeline.ingestion.trellis.get_by_pipeline_status", return_value=nodes), patch(
+    with patch(
+        "pipeline.ingestion.trellis.get_by_pipeline_status", return_value=nodes
+    ), patch(
         "pipeline.ingestion.ingest_batch", side_effect=chunk_results
     ) as ingest_batch:
         outcomes, result = ingestion.backfill_nodes(workers=2, chunk_size=2)
@@ -259,7 +304,9 @@ def test_backfill_processes_candidates_in_chunks_and_aggregates():
         call(["10.1/c", "10.1/d"], workers=2),
         call(["10.1/e"], workers=2),
     ]
-    assert outcomes == [outcome for chunk, _metrics in chunk_results for outcome in chunk]
+    assert outcomes == [
+        outcome for chunk, _metrics in chunk_results for outcome in chunk
+    ]
     assert result.candidates == 5
     assert result.resolvable == 5
     assert result.processed == 3
@@ -267,4 +314,7 @@ def test_backfill_processes_candidates_in_chunks_and_aggregates():
     assert result.citations_stored == 12
     assert result.failed == 1
     assert result.needs_review == 1
-    assert result.errors == ["database is locked", "Could not resolve a title for the reference"]
+    assert result.errors == [
+        "database is locked",
+        "Could not resolve a title for the reference",
+    ]

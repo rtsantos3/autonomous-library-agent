@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline._utils import bare_doi, extend_unique, slugify
+from pipeline._utils import bare_doi, extend_unique, slugify  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -47,7 +47,9 @@ def test_slugify_handles_punctuation_unicode_spaces_and_empty_edges(value, expec
 def test_extend_unique_mutates_target_preserves_order_and_returns_target():
     target = ["alpha", "beta"]
 
-    result = extend_unique(target, ["beta", None, "", [], " gamma ", "alpha", "delta", "gamma"])
+    result = extend_unique(
+        target, ["beta", None, "", [], " gamma ", "alpha", "delta", "gamma"]
+    )
 
     assert result is target
     assert target == ["alpha", "beta", "gamma", "delta"]

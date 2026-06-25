@@ -16,15 +16,14 @@ Pipeline:
 No LLM work. No new papers from S2. Only scaffold + edges.
 """
 
+import argparse
 import csv
 import json
 import os
-import sys
+import subprocess
 import time
 import unicodedata
-import argparse
-import subprocess
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -35,13 +34,16 @@ S2_BASE = "https://api.semanticscholar.org/graph/v1/paper"
 
 # ── Normalization ───────────────────────────────────────────────────────────
 
+
 def norm_title(title):
-    t = unicodedata.normalize('NFKD', (title or '').lower().strip())
-    t = t.encode('ascii', 'ignore').decode('ascii')
-    t = t.rstrip('.')
-    return ' '.join(t.split())
+    t = unicodedata.normalize("NFKD", (title or "").lower().strip())
+    t = t.encode("ascii", "ignore").decode("ascii")
+    t = t.rstrip(".")
+    return " ".join(t.split())
+
 
 # ── Trellis helpers ─────────────────────────────────────────────────────────
+
 
 def trellis_json(*args):
     cmd = ["trellis"] + list(args) + ["--json"]
@@ -49,18 +51,25 @@ def trellis_json(*args):
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if r.stdout.strip():
             return json.loads(r.stdout, strict=False)
-    except:
+    except Exception:
         pass
     return None
 
+
 def load_trellis_index():
     """Load all existing nodes into in-memory DOI/title indexes."""
-    doi_idx = {}   # doi_lower -> slug
+    doi_idx = {}  # doi_lower -> slug
     title_idx = {}  # norm_title -> slug
     count = 0
 
-    for tag in ["pipeline:queued", "pipeline:scaffolded", "pipeline:digested",
-                "pipeline:partial", "pipeline:needs-review", "pipeline:failed"]:
+    for tag in [
+        "pipeline:queued",
+        "pipeline:scaffolded",
+        "pipeline:digested",
+        "pipeline:partial",
+        "pipeline:needs-review",
+        "pipeline:failed",
+    ]:
         data = trellis_json("find", "--tag", tag)
         if not isinstance(data, list):
             continue
@@ -82,8 +91,11 @@ def load_trellis_index():
                 title_idx[norm_title(title)] = slug
             count += 1
 
-    print(f"    Trellis index: {count} nodes, {len(doi_idx)} DOIs, {len(title_idx)} titles")
+    print(
+        f"    Trellis index: {count} nodes, {len(doi_idx)} DOIs, {len(title_idx)} titles"
+    )
     return doi_idx, title_idx
+
 
 def check_dup(doi, title, doi_idx, title_idx):
     """In-memory dedup. Returns (is_dup, slug)."""
@@ -97,20 +109,31 @@ def check_dup(doi, title, doi_idx, title_idx):
             return True, title_idx[nt]
     return False, None
 
+
 # ── Step 1: Export EndNote SQLite ───────────────────────────────────────────
+
 
 def export_csv(path):
     print("[1] Exporting EndNote SQLite -> CSV...")
-    subprocess.run([
-        "sqlite3", "-header", "-csv", ENDNOTE_DB,
-        "SELECT id, title, author, year, abstract, url, "
-        "electronic_resource_number as doi, secondary_title as journal, "
-        "volume, pages, keywords FROM refs WHERE trash_state=0"
-    ], stdout=open(path, "w"), check=True)
+    subprocess.run(
+        [
+            "sqlite3",
+            "-header",
+            "-csv",
+            ENDNOTE_DB,
+            "SELECT id, title, author, year, abstract, url, "
+            "electronic_resource_number as doi, secondary_title as journal, "
+            "volume, pages, keywords FROM refs WHERE trash_state=0",
+        ],
+        stdout=open(path, "w"),
+        check=True,
+    )
     r = subprocess.run(["wc", "-l", path], capture_output=True, text=True)
     print(f"    {r.stdout.strip()}")
 
+
 # ── Step 2: Load and deduplicate CSV ────────────────────────────────────────
+
 
 def load_and_dedup(path):
     print("[2] Loading and deduplicating EndNote CSV...")
@@ -132,7 +155,11 @@ def load_and_dedup(path):
 
     deduped = []
     for doi_key, group in by_doi.items():
-        best = max(group, key=lambda p: len(p.get("abstract", "") or "") + len(p.get("keywords", "") or ""))
+        best = max(
+            group,
+            key=lambda p: len(p.get("abstract", "") or "")
+            + len(p.get("keywords", "") or ""),
+        )
         deduped.append(best)
 
     seen = set()
@@ -146,7 +173,9 @@ def load_and_dedup(path):
     print(f"    After internal dedup: {len(deduped)} ({has_doi} with DOIs)")
     return deduped
 
+
 # ── Step 3: Scaffold to Trellis ─────────────────────────────────────────────
+
 
 def scaffold(papers, doi_idx, title_idx, dry_run=False):
     print(f"\n[3] Scaffolding {len(papers)} papers into Trellis...")
@@ -193,11 +222,17 @@ def scaffold(papers, doi_idx, title_idx, dry_run=False):
         meta_json = json.dumps(meta, ensure_ascii=False).replace("'", "'\\''")
 
         result = trellis_json(
-            "add", "reference", title_esc,
-            "--abstract", (p.get("abstract") or "")[:4000],
-            "--metadata", meta_json,
-            "--tags", ",".join(tags),
-            "--parent", TRELLIS_PARENT,
+            "add",
+            "reference",
+            title_esc,
+            "--abstract",
+            (p.get("abstract") or "")[:4000],
+            "--metadata",
+            meta_json,
+            "--tags",
+            ",".join(tags),
+            "--parent",
+            TRELLIS_PARENT,
         )
 
         if isinstance(result, dict) and result.get("ok"):
@@ -214,9 +249,12 @@ def scaffold(papers, doi_idx, title_idx, dry_run=False):
                 print(f"    FAIL at {i}: {err}")
 
         if (i + 1) % 100 == 0:
-            print(f"    [{i+1}/{len(papers)}] added={stats['added']} dup={stats['dup']} fail={stats['fail']}")
+            print(
+                f"    [{i+1}/{len(papers)}] added={stats['added']} "
+                f"dup={stats['dup']} fail={stats['fail']}"
+            )
 
-    print(f"\n    Scaffold results:")
+    print("\n    Scaffold results:")
     print(f"      Added:    {stats['added']}")
     print(f"      Existing: {stats['dup']}")
     print(f"      Failed:   {stats['fail']}")
@@ -227,7 +265,9 @@ def scaffold(papers, doi_idx, title_idx, dry_run=False):
     slug_map.update(new_slug_map)
     return slug_map
 
+
 # ── Step 4: Derive edges from Semantic Scholar ──────────────────────────────
+
 
 def derive_edges(slug_map, dry_run=False):
     """Query S2 references for each paper, keep only intra-graph edges."""
@@ -237,7 +277,9 @@ def derive_edges(slug_map, dry_run=False):
     edges = set()
     no_data = 0
 
-    print(f"\n[4] Querying S2 for citation edges ({len(dois)} papers, {delay}s delay)...")
+    print(
+        f"\n[4] Querying S2 for citation edges ({len(dois)} papers, {delay}s delay)..."
+    )
     import urllib.request
 
     for i, doi in enumerate(dois):
@@ -250,7 +292,7 @@ def derive_edges(slug_map, dry_run=False):
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
-                for ref in (data.get("data") or []):
+                for ref in data.get("data") or []:
                     ext = (ref.get("citedPaper") or {}).get("externalIds") or {}
                     rd = ext.get("DOI")
                     if rd and rd.lower() in slug_map and slug_map[rd.lower()] != src:
@@ -266,6 +308,7 @@ def derive_edges(slug_map, dry_run=False):
     print(f"\n    Intra-graph edges: {len(edges)}")
     print(f"    S2 no data: {no_data}")
     return edges
+
 
 def wire_edges(edges, dry_run=False):
     if dry_run:
@@ -286,7 +329,9 @@ def wire_edges(edges, dry_run=False):
             fail += 1
     print(f"    OK: {ok}, Fail: {fail}")
 
+
 # ── Main ────────────────────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -315,6 +360,7 @@ def main():
         print("\n[4] Skipping S2 (--skip-s2)")
 
     print(f"\nDone. Slugs indexed: {len(slug_map)}")
+
 
 if __name__ == "__main__":
     main()

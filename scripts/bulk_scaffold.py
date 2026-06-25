@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
 """Bulk scaffold EndNote CSV papers into Trellis via ingest.ingest_paper()."""
-import csv, sys, os, time, unicodedata
+
+import csv
+import os
+import sys
+import time
+import unicodedata
 
 sys.path.insert(0, os.path.dirname(__file__))
-from ingest import ingest_paper, load_existing_titles, load_existing_dois, _norm_title
+from ingest import (  # noqa: E402
+    _norm_title,
+    ingest_paper,
+    load_existing_dois,
+    load_existing_titles,
+)
 
-CSV_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'endnote_papers.csv')
+CSV_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "endnote_papers.csv")
 
 
 def norm_title(t):
-    t = unicodedata.normalize('NFKD', (t or '').lower().strip())
-    t = t.encode('ascii', 'ignore').decode('ascii')
-    t = t.rstrip('.')
-    return ' '.join(t.split())
+    t = unicodedata.normalize("NFKD", (t or "").lower().strip())
+    t = t.encode("ascii", "ignore").decode("ascii")
+    t = t.rstrip(".")
+    return " ".join(t.split())
 
 
 # Load CSV
 papers = []
-with open(CSV_PATH, 'r', encoding='utf-8', errors='replace') as f:
+with open(CSV_PATH, "r", encoding="utf-8", errors="replace") as f:
     for row in csv.DictReader(f):
         papers.append(row)
 
@@ -26,9 +36,9 @@ seen_dois = set()
 seen_titles = set()
 unique = []
 for row in papers:
-    title = row.get('title', '').strip()
-    doi = (row.get('doi') or '').strip()
-    if not title or not doi.startswith('10.'):
+    title = row.get("title", "").strip()
+    doi = (row.get("doi") or "").strip()
+    if not title or not doi.startswith("10."):
         continue
     dl = doi.lower()
     tl = norm_title(title)
@@ -52,13 +62,13 @@ start = time.time()
 
 for i, row in enumerate(unique):
     slug = ingest_paper(
-        doi=row.get('doi', '').strip(),
-        title=row.get('title', '').strip(),
-        abstract=row.get('abstract', '').strip(),
-        year=row.get('year', '').strip(),
-        venue=row.get('venue', '').strip(),
-        authors=row.get('authors', '').strip(),
-        source='endnote-csv',
+        doi=row.get("doi", "").strip(),
+        title=row.get("title", "").strip(),
+        abstract=row.get("abstract", "").strip(),
+        year=row.get("year", "").strip(),
+        venue=row.get("venue", "").strip(),
+        authors=row.get("authors", "").strip(),
+        source="endnote-csv",
         depth=0,
         title_cache=title_cache,
         doi_cache=doi_cache,
@@ -67,17 +77,19 @@ for i, row in enumerate(unique):
         fail += 1
     else:
         # Update caches so subsequent CSV dupes hit in-memory
-        nt = _norm_title(row.get('title', ''))
+        nt = _norm_title(row.get("title", ""))
         if nt:
             title_cache[nt] = slug
-        doi_cache[row.get('doi', '').strip().lower()] = slug
+        doi_cache[row.get("doi", "").strip().lower()] = slug
         ok += 1
 
     if (i + 1) % 200 == 0:
         elapsed = time.time() - start
         rate = (i + 1) / elapsed
         eta = (len(unique) - i - 1) / rate
-        print(f"  [{i+1}/{len(unique)}] OK:{ok} FAIL:{fail} | {rate:.1f}/s ETA:{eta/60:.1f}m")
+        print(
+            f"  [{i+1}/{len(unique)}] OK:{ok} FAIL:{fail} | {rate:.1f}/s ETA:{eta/60:.1f}m"
+        )
 
 elapsed = time.time() - start
 print(f"\n=== DONE in {elapsed/60:.1f}m ===")

@@ -8,7 +8,11 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline.citations import CitationItem, CitationResult, fetch_outbound_citations
+from pipeline.citations import (  # noqa: E402
+    CitationItem,
+    CitationResult,
+    fetch_outbound_citations,
+)
 
 
 class Response:
@@ -37,7 +41,9 @@ def test_fetch_outbound_citations_empty_doi_returns_empty_result():
 
 
 def test_fetch_outbound_citations_http_error_returns_failed_source():
-    with patch("pipeline.citations.http_get", side_effect=requests.RequestException("boom")):
+    with patch(
+        "pipeline.citations.http_get", side_effect=requests.RequestException("boom")
+    ):
         result = fetch_outbound_citations("10.1/x")
 
     assert result == CitationResult(
@@ -60,7 +66,9 @@ def test_fetch_outbound_citations_json_error_returns_failed_source():
 
 @patch("pipeline.citations.http_get")
 @pytest.mark.parametrize("payload", [[], "not a dict"])
-def test_fetch_outbound_citations_malformed_top_level_payload_returns_empty(http_get, payload):
+def test_fetch_outbound_citations_malformed_top_level_payload_returns_empty(
+    http_get, payload
+):
     http_get.return_value = Response(payload)
 
     result = fetch_outbound_citations("10.1/x")
@@ -70,8 +78,12 @@ def test_fetch_outbound_citations_malformed_top_level_payload_returns_empty(http
 
 
 @patch("pipeline.citations.http_get")
-@pytest.mark.parametrize("payload", [{"other": []}, {"data": "not a list"}, {"data": {"bad": "shape"}}])
-def test_fetch_outbound_citations_missing_or_non_list_data_returns_empty(http_get, payload):
+@pytest.mark.parametrize(
+    "payload", [{"other": []}, {"data": "not a list"}, {"data": {"bad": "shape"}}]
+)
+def test_fetch_outbound_citations_missing_or_non_list_data_returns_empty(
+    http_get, payload
+):
     http_get.return_value = Response(payload)
 
     result = fetch_outbound_citations("10.1/x")
@@ -81,7 +93,10 @@ def test_fetch_outbound_citations_missing_or_non_list_data_returns_empty(http_ge
 
 
 def test_fetch_outbound_citations_item_missing_cited_paper_returns_empty():
-    with patch("pipeline.citations.http_get", return_value=Response({"data": [{"notCitedPaper": {}}]})):
+    with patch(
+        "pipeline.citations.http_get",
+        return_value=Response({"data": [{"notCitedPaper": {}}]}),
+    ):
         result = fetch_outbound_citations("10.1/x")
 
     assert result == CitationResult(

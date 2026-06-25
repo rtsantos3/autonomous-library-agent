@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Backfill scaffolded Trellis references with enriched tags and metadata."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,7 +11,7 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from pipeline.ingestion import backfill_nodes
+from pipeline.ingestion import backfill_nodes  # noqa: E402
 
 
 def main() -> int:
@@ -20,12 +21,17 @@ def main() -> int:
     parser.add_argument(
         "--only-missing",
         action="store_true",
-        help="skip nodes that already have topical tags (faster, but will not backfill citation edges on those nodes)",
+        help=(
+            "skip nodes that already have topical tags (faster, but will not backfill "
+            "citation edges on those nodes)"
+        ),
     )
     parser.add_argument("--statuses", default="queued,scaffolded,failed")
     parser.add_argument("--chunk-size", type=int, default=100)
     args = parser.parse_args()
-    statuses = tuple(status.strip() for status in args.statuses.split(",") if status.strip())
+    statuses = tuple(
+        status.strip() for status in args.statuses.split(",") if status.strip()
+    )
 
     _outcomes, result = backfill_nodes(
         workers=args.workers,

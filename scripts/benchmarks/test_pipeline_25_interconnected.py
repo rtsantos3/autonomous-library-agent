@@ -3,6 +3,7 @@ Integration test: 25 foundational interconnected microbiome papers.
 Uses ingest_batch() for parallelized processing.
 Reports cross-links materialized.
 """
+
 import importlib.util
 import sys
 import time
@@ -10,6 +11,7 @@ from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
@@ -77,20 +79,22 @@ def run():
 
     queued_after = len(find_nodes(tag="pipeline:queued"))
 
-    lines.extend([
-        f"\n{'='*60}",
-        "SUMMARY",
-        f"{'='*60}",
-        f"  Time elapsed:     {elapsed:.1f}s ({elapsed/len(DOIS):.1f}s per paper)",
-        f"  Processed:        {len(ok)}/{len(DOIS)}",
-        f"  Failed:           {len(failed)}",
-        f"  Created new:      {created}",
-        f"  Updated existing: {updated}",
-        f"  Citations stored: {total_stored}",
-        f"  Edges linked:     {total_linked}",
-        f"  Edges skipped:    {total_skipped}",
-        f"  Queued delta:     {queued_after - queued_before} (expect 0 — no stubs)",
-    ])
+    lines.extend(
+        [
+            f"\n{'='*60}",
+            "SUMMARY",
+            f"{'='*60}",
+            f"  Time elapsed:     {elapsed:.1f}s ({elapsed/len(DOIS):.1f}s per paper)",
+            f"  Processed:        {len(ok)}/{len(DOIS)}",
+            f"  Failed:           {len(failed)}",
+            f"  Created new:      {created}",
+            f"  Updated existing: {updated}",
+            f"  Citations stored: {total_stored}",
+            f"  Edges linked:     {total_linked}",
+            f"  Edges skipped:    {total_skipped}",
+            f"  Queued delta:     {queued_after - queued_before} (expect 0 — no stubs)",
+        ]
+    )
 
     if failed:
         lines.append("\n  Failures:")
@@ -112,12 +116,18 @@ def run():
             items = (meta.get("outbound_citations") or {}).get("items") or []
             for item in items:
                 item_doi = (item.get("doi") or "").lower()
-                if any(item_doi == d.lower() for d in DOIS if d.lower() != (o.parse.doi or "").lower()):
+                if any(
+                    item_doi == d.lower()
+                    for d in DOIS
+                    if d.lower() != (o.parse.doi or "").lower()
+                ):
                     cross_edges.append((o.upsert.slug, item_doi))
         except Exception as exc:
             cross_failures += 1
             doi = o.parse.doi if o.parse else "?"
-            lines.append(f"    ERROR checking cross-links for {o.upsert.slug} ({doi}): {exc!r}")
+            lines.append(
+                f"    ERROR checking cross-links for {o.upsert.slug} ({doi}): {exc!r}"
+            )
 
     lines.append(f"  Cross-citations within batch (in metadata): {len(cross_edges)}")
     lines.append(f"  Cross-link check failures: {cross_failures}")
@@ -127,11 +137,13 @@ def run():
         if len(cross_edges) > 10:
             lines.append(f"    ... and {len(cross_edges)-10} more")
 
-    lines.extend([
-        "",
-        format_metrics_table(metrics),
-        f"\n{'='*60}",
-    ])
+    lines.extend(
+        [
+            "",
+            format_metrics_table(metrics),
+            f"\n{'='*60}",
+        ]
+    )
     report = "\n".join(lines)
     print(report)
 

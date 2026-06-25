@@ -15,6 +15,7 @@ Read-only by default (dry run). Pass --apply to mutate. All writes go through
 the Trellis CLI (pipeline.trellis), never raw SQL, so tags JSON and tag_links
 stay in sync. Idempotent: re-running after a completed pass is a no-op.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,10 +24,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from pipeline import trellis
+from pipeline import trellis  # noqa: E402
+
 # Reuse the same camelCase->canonical map the live pipeline self-heals with, so
 # the migration and _scaffold_tags can never drift apart.
-from pipeline._utils import _CAMEL_TYPE_SLUGS, canonical_type_tag
+from pipeline._utils import _CAMEL_TYPE_SLUGS, canonical_type_tag  # noqa: E402
 
 CAMEL_MAP = _CAMEL_TYPE_SLUGS
 
@@ -64,7 +66,7 @@ def run(apply: bool) -> int:
         current = node.get("tags") or []
         # find_nodes results may be summaries without tags; fetch the full node.
         if not current:
-            current = (trellis.get_node(ident).get("tags") or [])
+            current = trellis.get_node(ident).get("tags") or []
         new_tags = canonicalize_tags(current)
         if new_tags == current:
             continue
@@ -75,15 +77,20 @@ def run(apply: bool) -> int:
         print(f"{'APPLY' if apply else 'DRY '} {slug}: -{removed} +{added}")
         if apply:
             trellis.update_node(ident, tags=new_tags, actor_id=MIGRATION_ACTOR)
-    print(f"\n{'Applied' if apply else 'Would change'} {changed} node(s) "
-          f"out of {len(nodes)} carrying a stale camelCase type tag.")
+    print(
+        f"\n{'Applied' if apply else 'Would change'} {changed} node(s) "
+        f"out of {len(nodes)} carrying a stale camelCase type tag."
+    )
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true",
-                        help="perform the rewrite (default is a dry run)")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform the rewrite (default is a dry run)",
+    )
     args = parser.parse_args()
     return run(apply=args.apply)
 

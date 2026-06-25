@@ -8,8 +8,8 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline import aggregator
-from pipeline.aggregator import (
+from pipeline import aggregator  # noqa: E402
+from pipeline.aggregator import (  # noqa: E402
     BATCH_URL,
     S2_BATCH_FIELDS,
     _build_resolved,
@@ -75,7 +75,9 @@ def test_batch_resolve_list_payload_maps_input_and_returned_doi_skips_none():
 
 
 def test_batch_resolve_dict_data_payload_resolves():
-    with patch("pipeline.aggregator.http_post", return_value=Response({"data": [s2_entry()]})):
+    with patch(
+        "pipeline.aggregator.http_post", return_value=Response({"data": [s2_entry()]})
+    ):
         resolved_map = batch_resolve(["https://doi.org/10.1/input"])
 
     assert resolved_map["10.1/input"].title == "Resolved title"
@@ -85,7 +87,9 @@ def test_batch_resolve_dict_data_payload_resolves():
 def test_batch_resolve_unusable_dict_payload_skips_chunk_and_logs_warning(caplog):
     caplog.set_level(logging.WARNING, logger="pipeline.aggregator")
 
-    with patch("pipeline.aggregator.http_post", return_value=Response({"error": "no data"})):
+    with patch(
+        "pipeline.aggregator.http_post", return_value=Response({"error": "no data"})
+    ):
         resolved_map = batch_resolve(["10.1/input"])
 
     assert resolved_map == {}
@@ -98,7 +102,9 @@ def test_batch_resolve_dict_payload_missing_list_data_skips_chunk(payload):
         assert batch_resolve(["10.1/input"]) == {}
 
 
-@pytest.mark.parametrize("entry", [[], "bad entry", {"authors": ["bad author"]}, {"references": ["bad ref"]}])
+@pytest.mark.parametrize(
+    "entry", [[], "bad entry", {"authors": ["bad author"]}, {"references": ["bad ref"]}]
+)
 def test_batch_resolve_malformed_entries_are_skipped_gracefully(entry):
     with patch("pipeline.aggregator.http_post", return_value=Response([entry])):
         assert batch_resolve(["10.1/input"]) == {}
@@ -125,7 +131,9 @@ def test_batch_resolve_request_and_json_errors_skip_chunks_and_continue(caplog):
         return item
 
     with patch("pipeline.aggregator.http_post", side_effect=fake_post) as post:
-        resolved_map = batch_resolve(["10.1/bad", "10.2/bad", "10.3/input"], chunk_size=1)
+        resolved_map = batch_resolve(
+            ["10.1/bad", "10.2/bad", "10.3/input"], chunk_size=1
+        )
 
     assert post.call_count == 3
     assert set(resolved_map) == {"10.3/input", "10.3/good"}
@@ -178,14 +186,20 @@ def test_batch_resolve_duplicate_input_dois_do_not_crash():
 
 
 def test_batch_resolve_canonical_alias_maps_input_and_returned_canonical_doi():
-    with patch("pipeline.aggregator.http_post", return_value=Response([s2_entry(doi="10.1/Canonical")])):
+    with patch(
+        "pipeline.aggregator.http_post",
+        return_value=Response([s2_entry(doi="10.1/Canonical")]),
+    ):
         resolved_map = batch_resolve(["10.1/input"])
 
     assert resolved_map["10.1/input"] is resolved_map["10.1/canonical"]
 
 
 def test_citation_from_reference_missing_doi_and_title_returns_none():
-    assert _citation_from_reference({"externalIds": {"PubMed": "123"}, "title": "   "}) is None
+    assert (
+        _citation_from_reference({"externalIds": {"PubMed": "123"}, "title": "   "})
+        is None
+    )
     assert _citation_from_reference({}) is None
     assert _citation_from_reference(None) is None
 
@@ -235,7 +249,11 @@ def test_build_resolved_merges_topical_metadata_authors_types_and_citations():
                     "year": "2021",
                 },
                 {"externalIds": {}, "title": "", "year": 2020},
-                {"externalIds": {}, "title": "Title-only reference", "year": "not-year"},
+                {
+                    "externalIds": {},
+                    "title": "Title-only reference",
+                    "year": "not-year",
+                },
             ],
         )
     )

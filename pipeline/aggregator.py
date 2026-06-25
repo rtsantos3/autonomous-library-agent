@@ -7,10 +7,9 @@ from typing import Optional
 
 import requests
 
-from pipeline._utils import bare_doi, extend_unique
 from pipeline._http import S2_LIMITER, http_post
+from pipeline._utils import bare_doi, extend_unique
 from pipeline.citations import CitationItem
-
 
 BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
 S2_BATCH_FIELDS = (
@@ -75,7 +74,11 @@ def _build_resolved(entry: dict) -> BatchResolved:
     extend_unique(fields_of_study, entry.get("fieldsOfStudy") or [])
     extend_unique(
         fields_of_study,
-        [item.get("category") for item in entry.get("s2FieldsOfStudy") or [] if isinstance(item, dict)],
+        [
+            item.get("category")
+            for item in entry.get("s2FieldsOfStudy") or []
+            if isinstance(item, dict)
+        ],
     )
     citations = []
     for ref in entry.get("references") or []:
@@ -87,7 +90,11 @@ def _build_resolved(entry: dict) -> BatchResolved:
         s2_id=entry.get("paperId"),
         title=entry.get("title"),
         abstract=entry.get("abstract"),
-        pmid=str(external_ids.get("PubMed")).strip() if external_ids.get("PubMed") is not None else None,
+        pmid=(
+            str(external_ids.get("PubMed")).strip()
+            if external_ids.get("PubMed") is not None
+            else None
+        ),
         year=str(entry.get("year")) if entry.get("year") else None,
         venue=entry.get("venue"),
         authors=[a.get("name") for a in entry.get("authors") or [] if a.get("name")],
@@ -151,11 +158,15 @@ def batch_resolve(dois: list[str], chunk_size: int = 500) -> dict[str, BatchReso
             payload = resp.json()
         except requests.RequestException as exc:
             chunks_failed += 1
-            logger.warning("s2 batch_resolve chunk offset %s request failed: %s", offset, exc)
+            logger.warning(
+                "s2 batch_resolve chunk offset %s request failed: %s", offset, exc
+            )
             continue
         except ValueError as exc:
             chunks_failed += 1
-            logger.warning("s2 batch_resolve chunk offset %s json decode failed: %s", offset, exc)
+            logger.warning(
+                "s2 batch_resolve chunk offset %s json decode failed: %s", offset, exc
+            )
             continue
 
         if isinstance(payload, list):

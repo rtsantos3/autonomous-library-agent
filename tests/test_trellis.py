@@ -8,21 +8,31 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline import trellis
-
+from pipeline import trellis  # noqa: E402
 
 UUID_SOURCE = "11111111-1111-1111-1111-111111111111"
 UUID_TARGET = "22222222-2222-2222-2222-222222222222"
 
 
 def test_norm_title_normalizes_unicode_whitespace_case_and_trailing_periods():
-    assert trellis._norm_title("  The Café\tMicrobiome\nStudy...  ") == "the cafe microbiome study"
+    assert (
+        trellis._norm_title("  The Café\tMicrobiome\nStudy...  ")
+        == "the cafe microbiome study"
+    )
 
 
 def test_normalize_doi_uri_accepts_common_prefixes_and_preserves_doi_case():
-    assert trellis._normalize_doi_uri("doi:10.1000/ABC ") == "https://doi.org/10.1000/ABC"
-    assert trellis._normalize_doi_uri("http://dx.doi.org/10.2000/X") == "https://doi.org/10.2000/X"
-    assert trellis._normalize_doi_uri("https://doi.org/10.3000/Y") == "https://doi.org/10.3000/Y"
+    assert (
+        trellis._normalize_doi_uri("doi:10.1000/ABC ") == "https://doi.org/10.1000/ABC"
+    )
+    assert (
+        trellis._normalize_doi_uri("http://dx.doi.org/10.2000/X")
+        == "https://doi.org/10.2000/X"
+    )
+    assert (
+        trellis._normalize_doi_uri("https://doi.org/10.3000/Y")
+        == "https://doi.org/10.3000/Y"
+    )
 
 
 def test_doi_key_returns_bare_lowercase_doi_or_none():
@@ -47,7 +57,9 @@ def test_run_raises_runtime_error_on_subprocess_timeout():
     timeout = subprocess.TimeoutExpired(cmd=["trellis", "find"], timeout=120)
 
     with patch("pipeline.trellis.subprocess.run", side_effect=timeout) as run:
-        with pytest.raises(RuntimeError, match="trellis find timed out after 120 seconds"):
+        with pytest.raises(
+            RuntimeError, match="trellis find timed out after 120 seconds"
+        ):
             trellis._run("find")
 
     assert run.call_args.kwargs["timeout"] == 120
@@ -67,9 +79,9 @@ def test_run_retries_busy_failure_and_returns_success():
         stderr="",
     )
 
-    with patch("pipeline.trellis.subprocess.run", side_effect=[busy, success]) as run, patch(
-        "pipeline.trellis.time.sleep"
-    ) as sleep:
+    with patch(
+        "pipeline.trellis.subprocess.run", side_effect=[busy, success]
+    ) as run, patch("pipeline.trellis.time.sleep") as sleep:
         assert trellis._run("find") == "[]"
 
     assert run.call_count == 2
@@ -113,7 +125,9 @@ def test_run_non_busy_failure_raises_without_retry():
 
 
 def test_node_identifier_prefers_id_then_uuid_then_slug():
-    assert trellis._node_identifier({"id": "id", "uuid": "uuid", "slug": "slug"}) == "id"
+    assert (
+        trellis._node_identifier({"id": "id", "uuid": "uuid", "slug": "slug"}) == "id"
+    )
     assert trellis._node_identifier({"uuid": "uuid", "slug": "slug"}) == "uuid"
     assert trellis._node_identifier({"slug": "slug"}) == "slug"
     assert trellis._node_identifier({}) is None
@@ -178,12 +192,31 @@ def test_dedup_check_indexed_match_precedence_and_misses():
         "by_title": {"title based microbiome paper": by_title},
     }
 
-    assert trellis.dedup_check_indexed(index, s2id="s2", doi="10.1/x", pmid="123") == by_s2id
-    assert trellis.dedup_check_indexed(index, doi="https://doi.org/10.1/X", pmid="123") == by_doi
-    assert trellis.dedup_check_indexed(index, pmid=123, title="Title Based Microbiome Paper") == by_pmid
-    assert trellis.dedup_check_indexed(index, title="Title Based Microbiome Paper.") == by_title
+    assert (
+        trellis.dedup_check_indexed(index, s2id="s2", doi="10.1/x", pmid="123")
+        == by_s2id
+    )
+    assert (
+        trellis.dedup_check_indexed(index, doi="https://doi.org/10.1/X", pmid="123")
+        == by_doi
+    )
+    assert (
+        trellis.dedup_check_indexed(
+            index, pmid=123, title="Title Based Microbiome Paper"
+        )
+        == by_pmid
+    )
+    assert (
+        trellis.dedup_check_indexed(index, title="Title Based Microbiome Paper.")
+        == by_title
+    )
     assert trellis.dedup_check_indexed(index, title="too short") is None
-    assert trellis.dedup_check_indexed(index, s2id="missing", doi="10.9/missing", pmid="999") is None
+    assert (
+        trellis.dedup_check_indexed(
+            index, s2id="missing", doi="10.9/missing", pmid="999"
+        )
+        is None
+    )
 
 
 def test_find_by_s2id_and_pmid_return_first_tag_match_from_chokepoint():
@@ -281,7 +314,9 @@ def test_reverse_materialize_counts_successful_and_idempotent_links_only():
             {"ok": False, "error": "failed"},
         ],
     ) as link:
-        created = trellis.reverse_materialize(UUID_TARGET, doi="https://doi.org/10.9/TARGET", index=index)
+        created = trellis.reverse_materialize(
+            UUID_TARGET, doi="https://doi.org/10.9/TARGET", index=index
+        )
 
     assert created == 2
     link.assert_has_calls(
@@ -305,7 +340,9 @@ def test_reverse_materialize_skips_self_links_and_missing_waiting_sources():
     }
 
     with patch("pipeline.trellis.link_nodes", return_value={"ok": True}) as link:
-        created = trellis.reverse_materialize(UUID_TARGET, doi="https://doi.org/10.9/TARGET", index=index)
+        created = trellis.reverse_materialize(
+            UUID_TARGET, doi="https://doi.org/10.9/TARGET", index=index
+        )
 
     assert created == 1
     link.assert_called_once_with(UUID_SOURCE, UUID_TARGET, "references")
@@ -322,7 +359,9 @@ def test_reverse_materialize_links_multiple_waiting_sources_for_same_doi_key():
     }
 
     with patch("pipeline.trellis.link_nodes", return_value={"ok": True}) as link:
-        created = trellis.reverse_materialize(UUID_TARGET, doi="doi:10.9/TARGET", index=index)
+        created = trellis.reverse_materialize(
+            UUID_TARGET, doi="doi:10.9/TARGET", index=index
+        )
 
     assert created == 2
     link.assert_has_calls(
@@ -337,12 +376,35 @@ def test_reverse_materialize_returns_zero_without_index_or_valid_doi():
     with patch("pipeline.trellis.link_nodes", side_effect=AssertionError):
         assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index=None) == 0
         assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index={}) == 0
-        assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index={"by_doi": {}}) == 0
-        assert trellis.reverse_materialize(UUID_TARGET, doi="", index={"pending_citations": {}}) == 0
-        assert trellis.reverse_materialize(UUID_TARGET, doi="not-a-doi", index={"pending_citations": {}}) == 0
-        assert trellis.reverse_materialize("", doi="10.1/x", index={"pending_citations": {}}) == 0
+        assert (
+            trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index={"by_doi": {}})
+            == 0
+        )
+        assert (
+            trellis.reverse_materialize(
+                UUID_TARGET, doi="", index={"pending_citations": {}}
+            )
+            == 0
+        )
+        assert (
+            trellis.reverse_materialize(
+                UUID_TARGET, doi="not-a-doi", index={"pending_citations": {}}
+            )
+            == 0
+        )
+        assert (
+            trellis.reverse_materialize(
+                "", doi="10.1/x", index={"pending_citations": {}}
+            )
+            == 0
+        )
         with patch("pipeline.trellis._doi_key", return_value=None):
-            assert trellis.reverse_materialize(UUID_TARGET, doi="10.1/x", index={"pending_citations": {}}) == 0
+            assert (
+                trellis.reverse_materialize(
+                    UUID_TARGET, doi="10.1/x", index={"pending_citations": {}}
+                )
+                == 0
+            )
 
 
 def test_set_pipeline_status_rejects_unknown_status_before_subprocess():
@@ -352,8 +414,13 @@ def test_set_pipeline_status_rejects_unknown_status_before_subprocess():
 
 
 def test_link_nodes_treats_duplicate_errors_as_idempotent():
-    with patch("pipeline.trellis._run", side_effect=RuntimeError("already exists")) as run:
-        assert trellis.link_nodes(UUID_SOURCE, UUID_TARGET, "references") == {"ok": True, "idempotent": True}
+    with patch(
+        "pipeline.trellis._run", side_effect=RuntimeError("already exists")
+    ) as run:
+        assert trellis.link_nodes(UUID_SOURCE, UUID_TARGET, "references") == {
+            "ok": True,
+            "idempotent": True,
+        }
 
     run.assert_has_calls(
         [

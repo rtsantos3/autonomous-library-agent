@@ -52,7 +52,7 @@ def canonical_type_tag(tag) -> str:
     # without re-deriving from source metadata.
     text = str(tag)
     if text.startswith("type:"):
-        canonical = _CAMEL_TYPE_SLUGS.get(text[len("type:"):])
+        canonical = _CAMEL_TYPE_SLUGS.get(text[len("type:") :])
         if canonical:
             return f"type:{canonical}"
     return text
@@ -82,6 +82,6 @@ def bare_doi(value: Optional[str]) -> Optional[str]:
     lower = value.lower()
     for prefix in ("doi:", "https://doi.org/", "http://dx.doi.org/"):
         if lower.startswith(prefix):
-            value = value[len(prefix):]
+            value = value[len(prefix) :]
             break
     return value.strip().lower() or None

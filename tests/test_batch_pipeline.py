@@ -5,10 +5,10 @@ from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline import ingestion
-from pipeline.aggregator import BatchResolved
-from pipeline.citations import CitationItem, CitationResult
-from pipeline.ingestion import (
+from pipeline import ingestion  # noqa: E402
+from pipeline.aggregator import BatchResolved  # noqa: E402
+from pipeline.citations import CitationItem, CitationResult  # noqa: E402
+from pipeline.ingestion import (  # noqa: E402
     DedupResult,
     IngestionOutcome,
     ParseResult,
@@ -68,9 +68,14 @@ class TestBatchWorkers:
 
         index = {"by_doi": {}}
 
-        with patch("pipeline.ingestion.resolve_identity", return_value=resolved()) as resolve, patch(
-            "pipeline.ingestion.find_existing_indexed", return_value=DedupResult(None, None)
-        ) as dedup, patch("pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)) as upsert:
+        with patch(
+            "pipeline.ingestion.resolve_identity", return_value=resolved()
+        ) as resolve, patch(
+            "pipeline.ingestion.find_existing_indexed",
+            return_value=DedupResult(None, None),
+        ) as dedup, patch(
+            "pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)
+        ) as upsert:
             result = ingestion.resolve_and_upsert(
                 (0, "10.1/x"),
                 outcomes,
@@ -82,7 +87,9 @@ class TestBatchWorkers:
             )
 
         assert result == (0, "10.1/x", "source")
-        assert outcomes[0].parse == ParseResult(None, "10.1/x", None, None, [], None, None)
+        assert outcomes[0].parse == ParseResult(
+            None, "10.1/x", None, None, [], None, None
+        )
         assert outcomes[0].resolve == resolved()
         assert outcomes[0].dedup == DedupResult(None, None)
         assert outcomes[0].upsert == UpsertResult("source", True)
@@ -98,7 +105,10 @@ class TestBatchWorkers:
     def test_resolve_and_upsert_catches_exception(self):
         outcomes = [IngestionOutcome()]
 
-        with patch("pipeline.ingestion.resolve_identity", side_effect=RuntimeError("resolve failed")):
+        with patch(
+            "pipeline.ingestion.resolve_identity",
+            side_effect=RuntimeError("resolve failed"),
+        ):
             result = ingestion.resolve_and_upsert(
                 (0, "10.1/x"),
                 outcomes,
@@ -115,12 +125,17 @@ class TestBatchWorkers:
 
     def test_fetch_and_store_uses_prefetched_citations(self):
         outcomes = [IngestionOutcome()]
-        fetched = prefetched(citations=[CitationItem("10.2/y", None, None, "Target", 2020)])
+        fetched = prefetched(
+            citations=[CitationItem("10.2/y", None, None, "Target", 2020)]
+        )
 
-        with patch("pipeline.ingestion.store_citations", return_value=ingestion.CitationStoreResult(1)) as store, patch(
-            "pipeline.ingestion.fetch_outbound_citations"
-        ) as fetch:
-            result = ingestion.fetch_and_store((0, "10.1/x", "source"), outcomes, lambda doi: fetched, ["10.1/x"])
+        with patch(
+            "pipeline.ingestion.store_citations",
+            return_value=ingestion.CitationStoreResult(1),
+        ) as store, patch("pipeline.ingestion.fetch_outbound_citations") as fetch:
+            result = ingestion.fetch_and_store(
+                (0, "10.1/x", "source"), outcomes, lambda doi: fetched, ["10.1/x"]
+            )
 
         assert result[0] == 0
         assert result[1] == "source"
@@ -133,8 +148,13 @@ class TestBatchWorkers:
     def test_fetch_and_store_catches_exception(self):
         outcomes = [IngestionOutcome()]
 
-        with patch("pipeline.ingestion.store_citations", side_effect=RuntimeError("store failed")):
-            result = ingestion.fetch_and_store((0, "10.1/x", "source"), outcomes, lambda doi: prefetched(), ["10.1/x"])
+        with patch(
+            "pipeline.ingestion.store_citations",
+            side_effect=RuntimeError("store failed"),
+        ):
+            result = ingestion.fetch_and_store(
+                (0, "10.1/x", "source"), outcomes, lambda doi: prefetched(), ["10.1/x"]
+            )
 
         assert result is None
         assert outcomes[0].errors == ["store failed"]
@@ -143,18 +163,28 @@ class TestBatchWorkers:
         outcomes = [IngestionOutcome()]
         citations = citation_result()
 
-        with patch("pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(2, 1)) as link:
-            result = ingestion.link_stored((0, "source", citations), outcomes, {"target": {"slug": "target"}})
+        with patch(
+            "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(2, 1)
+        ) as link:
+            result = ingestion.link_stored(
+                (0, "source", citations), outcomes, {"target": {"slug": "target"}}
+            )
 
         assert result == 0
         assert outcomes[0].link == ingestion.LinkResult(2, 1)
-        link.assert_called_once_with("source", citations, index={"target": {"slug": "target"}})
+        link.assert_called_once_with(
+            "source", citations, index={"target": {"slug": "target"}}
+        )
 
     def test_link_stored_catches_exception(self):
         outcomes = [IngestionOutcome()]
 
-        with patch("pipeline.ingestion.link_citations", side_effect=RuntimeError("link failed")):
-            result = ingestion.link_stored((0, "source", citation_result()), outcomes, {})
+        with patch(
+            "pipeline.ingestion.link_citations", side_effect=RuntimeError("link failed")
+        ):
+            result = ingestion.link_stored(
+                (0, "source", citation_result()), outcomes, {}
+            )
 
         assert result is None
         assert outcomes[0].errors == ["link failed"]
@@ -164,7 +194,9 @@ class TestBatchWorkers:
         outcomes[0].link = ingestion.LinkResult(3, 1)
         verify = ingestion.VerifyResult(True, True, "scaffolded", 3)
 
-        with patch("pipeline.ingestion.verify_outcome", return_value=verify) as verify_outcome:
+        with patch(
+            "pipeline.ingestion.verify_outcome", return_value=verify
+        ) as verify_outcome:
             result = ingestion.verify_upserted((0, "10.1/x", "source"), outcomes)
 
         assert result is None
@@ -174,7 +206,10 @@ class TestBatchWorkers:
     def test_verify_upserted_catches_exception_and_returns_none(self):
         outcomes = [IngestionOutcome()]
 
-        with patch("pipeline.ingestion.verify_outcome", side_effect=RuntimeError("verify failed")):
+        with patch(
+            "pipeline.ingestion.verify_outcome",
+            side_effect=RuntimeError("verify failed"),
+        ):
             result = ingestion.verify_upserted((0, "10.1/x", "source"), outcomes)
 
         assert result is None
@@ -183,16 +218,25 @@ class TestBatchWorkers:
     def test_set_final_pipeline_status_marks_success_and_classified_failures(self):
         outcomes = [
             IngestionOutcome(upsert=UpsertResult("ok", True)),
-            IngestionOutcome(upsert=UpsertResult("permanent", True), errors=["Could not resolve a title for the reference"]),
-            IngestionOutcome(upsert=UpsertResult("transient", True), errors=["database is locked"]),
+            IngestionOutcome(
+                upsert=UpsertResult("permanent", True),
+                errors=["Could not resolve a title for the reference"],
+            ),
+            IngestionOutcome(
+                upsert=UpsertResult("transient", True), errors=["database is locked"]
+            ),
         ]
 
-        with patch("pipeline.ingestion.trellis.set_pipeline_status") as set_status, patch(
-            "pipeline.ingestion.trellis.annotate_node"
-        ) as annotate:
+        with patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ) as set_status, patch("pipeline.ingestion.trellis.annotate_node") as annotate:
             ingestion.set_final_pipeline_status((0, "10.1/ok", "ok"), outcomes)
-            ingestion.set_final_pipeline_status((1, "10.1/permanent", "permanent"), outcomes)
-            ingestion.set_final_pipeline_status((2, "10.1/transient", "transient"), outcomes)
+            ingestion.set_final_pipeline_status(
+                (1, "10.1/permanent", "permanent"), outcomes
+            )
+            ingestion.set_final_pipeline_status(
+                (2, "10.1/transient", "transient"), outcomes
+            )
 
         assert outcomes[0].errors == []
         assert outcomes[1].errors == ["Could not resolve a title for the reference"]
@@ -218,7 +262,10 @@ class TestBatchWorkers:
     def test_set_final_pipeline_status_captures_status_update_error(self):
         outcomes = [IngestionOutcome(upsert=UpsertResult("ok", True))]
 
-        with patch("pipeline.ingestion.trellis.set_pipeline_status", side_effect=RuntimeError("status failed")):
+        with patch(
+            "pipeline.ingestion.trellis.set_pipeline_status",
+            side_effect=RuntimeError("status failed"),
+        ):
             ingestion.set_final_pipeline_status((0, "10.1/ok", "ok"), outcomes)
 
         assert outcomes[0].errors == ["status failed"]
@@ -228,23 +275,34 @@ class TestBatchWorkers:
         index = {"by_doi": {}}
 
         with patch("pipeline.ingestion.trellis.reverse_materialize") as reverse:
-            result = ingestion.reverse_materialize_upserted((0, "10.1/citation", "source"), outcomes, index)
+            result = ingestion.reverse_materialize_upserted(
+                (0, "10.1/citation", "source"), outcomes, index
+            )
 
         assert result is None
         assert outcomes[0].errors == []
         reverse.assert_called_once_with("source", doi="10.1/resolved", index=index)
 
     def test_reverse_materialize_upserted_captures_error_on_item(self):
-        outcomes = [IngestionOutcome(resolve=resolved(doi=None)), IngestionOutcome(resolve=resolved(doi="10.1/ok"))]
+        outcomes = [
+            IngestionOutcome(resolve=resolved(doi=None)),
+            IngestionOutcome(resolve=resolved(doi="10.1/ok")),
+        ]
         index = {"by_doi": {}}
 
         def reverse(slug, **kwargs):
             if slug == "bad":
                 raise RuntimeError("reverse failed")
 
-        with patch("pipeline.ingestion.trellis.reverse_materialize", side_effect=reverse) as reverse_materialize:
-            ingestion.reverse_materialize_upserted((0, "10.1/fallback", "bad"), outcomes, index)
-            ingestion.reverse_materialize_upserted((1, "10.1/citation", "ok"), outcomes, index)
+        with patch(
+            "pipeline.ingestion.trellis.reverse_materialize", side_effect=reverse
+        ) as reverse_materialize:
+            ingestion.reverse_materialize_upserted(
+                (0, "10.1/fallback", "bad"), outcomes, index
+            )
+            ingestion.reverse_materialize_upserted(
+                (1, "10.1/citation", "ok"), outcomes, index
+            )
 
         assert outcomes[0].errors == ["reverse failed"]
         assert outcomes[1].errors == []
@@ -272,21 +330,31 @@ class TestIngestBatch:
                 raise RuntimeError("upsert failed for b")
             return UpsertResult(f"slug-{resolve.doi[-1]}", True)
 
-        with patch("pipeline.aggregator.batch_resolve", return_value=resolved_map) as batch_resolve, patch(
+        with patch(
+            "pipeline.aggregator.batch_resolve", return_value=resolved_map
+        ) as batch_resolve, patch(
             "pipeline.ingestion.trellis.build_node_index",
-            side_effect=[{"old": {"slug": "old"}}, {"old": {"slug": "old"}, "new": {"slug": "new"}}],
-        ) as build_index, patch("pipeline.ingestion.trellis.reverse_materialize") as reverse, patch(
+            side_effect=[
+                {"old": {"slug": "old"}},
+                {"old": {"slug": "old"}, "new": {"slug": "new"}},
+            ],
+        ) as build_index, patch(
+            "pipeline.ingestion.trellis.reverse_materialize"
+        ) as reverse, patch(
             "pipeline.ingestion.resolve_identity", side_effect=resolve_identity
         ), patch(
-            "pipeline.ingestion.find_existing_indexed", return_value=DedupResult(None, None)
+            "pipeline.ingestion.find_existing_indexed",
+            return_value=DedupResult(None, None),
         ), patch(
             "pipeline.ingestion.upsert_node", side_effect=upsert_node
         ), patch(
-            "pipeline.ingestion.store_citations", return_value=ingestion.CitationStoreResult(1)
+            "pipeline.ingestion.store_citations",
+            return_value=ingestion.CitationStoreResult(1),
         ), patch(
             "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(1, 0)
         ), patch(
-            "pipeline.ingestion.verify_outcome", return_value=ingestion.VerifyResult(True, True, "scaffolded", 1)
+            "pipeline.ingestion.verify_outcome",
+            return_value=ingestion.VerifyResult(True, True, "scaffolded", 1),
         ), patch(
             "pipeline.ingestion.trellis.set_pipeline_status"
         ), patch(
@@ -337,46 +405,67 @@ class TestIngestBatch:
         batch_resolve.assert_called_once_with(dois)
         assert build_index.call_count == 2
         assert reverse.call_count == 2
-        assert sorted(call.kwargs["doi"] for call in reverse.call_args_list) == ["10.1/a", "10.1/c"]
+        assert sorted(call.kwargs["doi"] for call in reverse.call_args_list) == [
+            "10.1/a",
+            "10.1/c",
+        ]
         fetch.assert_not_called()
 
     def test_ingest_batch_phase1_dedup_uses_index_not_subprocess_chain(self):
         dois = ["10.1/a"]
-        indexed_match = {"slug": "existing-a", "tags": ["pipeline:scaffolded"], "metadata": {}}
+        indexed_match = {
+            "slug": "existing-a",
+            "tags": ["pipeline:scaffolded"],
+            "metadata": {},
+        }
         index = {"by_doi": {"10.1/a": indexed_match}}
 
         def resolve_identity(parsed, prefetched=None):
-            return resolved(doi=parsed.doi, s2_id=None, pmid=None, title="Indexed microbiome paper")
+            return resolved(
+                doi=parsed.doi, s2_id=None, pmid=None, title="Indexed microbiome paper"
+            )
 
-        with patch("pipeline.aggregator.batch_resolve", return_value={"10.1/a": prefetched(doi="10.1/a")}), patch(
+        with patch(
+            "pipeline.aggregator.batch_resolve",
+            return_value={"10.1/a": prefetched(doi="10.1/a")},
+        ), patch(
             "pipeline.ingestion.trellis.build_node_index",
             side_effect=[index, {"pending_citations": {}}],
         ), patch(
             "pipeline.ingestion.resolve_identity", side_effect=resolve_identity
         ), patch(
-            "pipeline.ingestion.find_existing", side_effect=AssertionError("subprocess dedup should not run")
+            "pipeline.ingestion.find_existing",
+            side_effect=AssertionError("subprocess dedup should not run"),
         ), patch(
-            "pipeline.ingestion.trellis.find_by_s2id", side_effect=AssertionError("find_by_s2id should not run")
+            "pipeline.ingestion.trellis.find_by_s2id",
+            side_effect=AssertionError("find_by_s2id should not run"),
         ) as find_by_s2id, patch(
-            "pipeline.ingestion.trellis.find_by_doi", side_effect=AssertionError("find_by_doi should not run")
+            "pipeline.ingestion.trellis.find_by_doi",
+            side_effect=AssertionError("find_by_doi should not run"),
         ) as find_by_doi, patch(
-            "pipeline.ingestion.trellis.find_by_pmid", side_effect=AssertionError("find_by_pmid should not run")
+            "pipeline.ingestion.trellis.find_by_pmid",
+            side_effect=AssertionError("find_by_pmid should not run"),
         ) as find_by_pmid, patch(
-            "pipeline.ingestion.trellis.find_by_title", side_effect=AssertionError("find_by_title should not run")
+            "pipeline.ingestion.trellis.find_by_title",
+            side_effect=AssertionError("find_by_title should not run"),
         ) as find_by_title, patch(
-            "pipeline.ingestion.trellis.grep_nodes", side_effect=AssertionError("grep_nodes should not run")
+            "pipeline.ingestion.trellis.grep_nodes",
+            side_effect=AssertionError("grep_nodes should not run"),
         ) as grep_nodes, patch(
             "pipeline.ingestion.trellis.dedup_check_indexed", return_value=indexed_match
         ) as dedup_indexed, patch(
-            "pipeline.ingestion.upsert_node", return_value=UpsertResult("existing-a", False)
+            "pipeline.ingestion.upsert_node",
+            return_value=UpsertResult("existing-a", False),
         ), patch(
             "pipeline.ingestion.trellis.reverse_materialize", return_value=0
         ), patch(
-            "pipeline.ingestion.store_citations", return_value=ingestion.CitationStoreResult(0)
+            "pipeline.ingestion.store_citations",
+            return_value=ingestion.CitationStoreResult(0),
         ), patch(
             "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(0, 0)
         ), patch(
-            "pipeline.ingestion.verify_outcome", return_value=ingestion.VerifyResult(True, True, "scaffolded", 0)
+            "pipeline.ingestion.verify_outcome",
+            return_value=ingestion.VerifyResult(True, True, "scaffolded", 0),
         ), patch(
             "pipeline.ingestion.trellis.set_pipeline_status"
         ):

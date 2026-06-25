@@ -25,6 +25,7 @@ Run:
   curl -s localhost:8901/stats | python -m json.tool
   curl -s 'localhost:8901/mutations?since=120&entity_type=node&limit=20'
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,12 +49,19 @@ def _db_path() -> str:
 
 
 _MUTATION_COLUMNS = (
-    "id", "timestamp", "actor", "actor_id", "entity_type", "entity_id", "operation"
+    "id",
+    "timestamp",
+    "actor",
+    "actor_id",
+    "entity_type",
+    "entity_id",
+    "operation",
 )
 _MAX_LIMIT = 1000
 
 
 # --- Body ------------------------------------------------------------------
+
 
 def _connect() -> sqlite3.Connection:
     # Read-only URI connection: cannot lock out or corrupt the live writer.
@@ -75,6 +83,7 @@ def _maybe_json(value):
 
 def query_stats() -> dict:
     with _connect() as conn:
+
         def scalar(sql: str) -> int:
             return conn.execute(sql).fetchone()[0]
 
@@ -191,6 +200,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 # --- End -------------------------------------------------------------------
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

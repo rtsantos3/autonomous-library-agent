@@ -5,7 +5,8 @@ Import RIS records into Trellis and optionally expand citations for a seed DOI.
 Examples:
     python scripts/import_ris_network.py data/endnote-extracted/PDF
     python scripts/import_ris_network.py data/endnote-extracted/PDF --seed-doi 10.1038/nature25973
-    python scripts/import_ris_network.py some_file.ris --seed-title "Environment dominates over host genetics..."
+    python scripts/import_ris_network.py some_file.ris \
+        --seed-title "Environment dominates over host genetics..."
 
 The importer keeps the pipeline additive:
     - RIS records become pipeline:scaffolded nodes
@@ -141,7 +142,9 @@ def parse_ris_text(text: str) -> list[RisRecord]:
             current_tag = tag
             continue
         if current_tag and line[:1].isspace():
-            current[current_tag][-1] = f"{current[current_tag][-1]} {line.strip()}".strip()
+            current[current_tag][
+                -1
+            ] = f"{current[current_tag][-1]} {line.strip()}".strip()
 
     flush()
     return records
@@ -200,7 +203,9 @@ def extract_doi(data: dict[str, list[str]]) -> str:
 
 
 def maybe_link(source_slug: str, target_slug: str, relation: str) -> bool:
-    result = trellis("link", source_slug, target_slug, "--relation", relation, "--actor-id", ACTOR_ID)
+    result = trellis(
+        "link", source_slug, target_slug, "--relation", relation, "--actor-id", ACTOR_ID
+    )
     return result.returncode == 0
 
 
@@ -264,7 +269,9 @@ def add_title_only_node(
     return slug
 
 
-def resolve_record_identity(record: RisRecord, title_cache: dict[str, str], doi_cache: dict[str, str]) -> tuple[str, Optional[str], str]:
+def resolve_record_identity(
+    record: RisRecord, title_cache: dict[str, str], doi_cache: dict[str, str]
+) -> tuple[str, Optional[str], str]:
     """
     Normalize the record identity before any Trellis writes.
 
@@ -309,7 +316,11 @@ def persist_reference_record(
             depth=depth,
             parent=PARENT,
             actor=ACTOR_ID,
-            extra_tags=[f"kw:{normalize_text(kw).replace(' ', '-')}" for kw in record.keywords if normalize_text(kw)],
+            extra_tags=[
+                f"kw:{normalize_text(kw).replace(' ', '-')}"
+                for kw in record.keywords
+                if normalize_text(kw)
+            ],
             title_cache=title_cache,
             doi_cache=doi_cache,
         )
@@ -322,7 +333,11 @@ def persist_reference_record(
             authors=record.authors,
             doi=doi,
             url=record.url or "",
-            extra_tags=[f"kw:{normalize_text(kw).replace(' ', '-')}" for kw in record.keywords if normalize_text(kw)],
+            extra_tags=[
+                f"kw:{normalize_text(kw).replace(' ', '-')}"
+                for kw in record.keywords
+                if normalize_text(kw)
+            ],
             title_cache=title_cache,
             dry_run=dry_run,
         )
@@ -345,14 +360,24 @@ def resolve_node_by_doi(doi: str, doi_cache: dict[str, str]) -> Optional[str]:
     hits = trellis_json("find", "--text", uri)
     if not hits:
         return None
-    nodes = hits if isinstance(hits, list) else hits.get("results", hits.get("nodes", []))
+    nodes = (
+        hits if isinstance(hits, list) else hits.get("results", hits.get("nodes", []))
+    )
     for node in nodes:
         node_uri = (node.get("uri") or "").strip().lower()
-        meta = node.get("metadata", {}) if isinstance(node.get("metadata", {}), dict) else {}
+        meta = (
+            node.get("metadata", {})
+            if isinstance(node.get("metadata", {}), dict)
+            else {}
+        )
         ref = meta.get("reference", {}) if isinstance(meta, dict) else {}
         ref_doi = normalize_doi(str(ref.get("doi", "") or ""))
         ref_url = str(ref.get("url", "") or "").lower()
-        if node_uri in {uri.lower(), f"doi:{doi}"} or ref_doi == doi or f"doi.org/{doi}" in ref_url:
+        if (
+            node_uri in {uri.lower(), f"doi:{doi}"}
+            or ref_doi == doi
+            or f"doi.org/{doi}" in ref_url
+        ):
             slug = node.get("slug")
             if slug:
                 doi_cache[doi] = slug
@@ -369,11 +394,20 @@ def resolve_node_by_title(title: str, title_cache: dict[str, str]) -> Optional[s
     hits = trellis_json("find", "--text", title)
     if not hits:
         return None
-    nodes = hits if isinstance(hits, list) else hits.get("results", hits.get("nodes", []))
+    nodes = (
+        hits if isinstance(hits, list) else hits.get("results", hits.get("nodes", []))
+    )
     for node in nodes:
-        meta = node.get("metadata", {}) if isinstance(node.get("metadata", {}), dict) else {}
+        meta = (
+            node.get("metadata", {})
+            if isinstance(node.get("metadata", {}), dict)
+            else {}
+        )
         ref = meta.get("reference", {}) if isinstance(meta, dict) else {}
-        if normalize_text(node.get("title", "")) == nt or normalize_text(ref.get("title", "")) == nt:
+        if (
+            normalize_text(node.get("title", "")) == nt
+            or normalize_text(ref.get("title", "")) == nt
+        ):
             slug = node.get("slug")
             if slug:
                 title_cache[nt] = slug
@@ -416,7 +450,9 @@ def fetch_related(doi: str, direction: str) -> list[dict]:
 
 
 def related_entry(item: dict, direction: str) -> tuple[str, str]:
-    paper = item.get("citedPaper" if direction == "references" else "citingPaper") or item
+    paper = (
+        item.get("citedPaper" if direction == "references" else "citingPaper") or item
+    )
     title = paper.get("title", "") or ""
     doi = normalize_doi((paper.get("externalIds") or {}).get("DOI", "") or "")
     return title, doi
@@ -500,9 +536,13 @@ def orchestrate_reference_ingestion(
         2. Persist the reference node.
         3. Fetch and wire citations when the record has a DOI.
     """
-    doi, existing_slug, skip_reason = resolve_record_identity(record, title_cache, doi_cache)
+    doi, existing_slug, skip_reason = resolve_record_identity(
+        record, title_cache, doi_cache
+    )
     if existing_slug:
-        return ImportOutcome(slug=existing_slug, doi=doi, imported=False, skipped_reason=skip_reason)
+        return ImportOutcome(
+            slug=existing_slug, doi=doi, imported=False, skipped_reason=skip_reason
+        )
 
     slug = persist_reference_record(
         record,
@@ -514,7 +554,9 @@ def orchestrate_reference_ingestion(
         doi=doi,
     )
     if not slug:
-        return ImportOutcome(slug=None, doi=doi, imported=False, skipped_reason="persist-failed")
+        return ImportOutcome(
+            slug=None, doi=doi, imported=False, skipped_reason="persist-failed"
+        )
 
     linked_edges = 0
     if expand and doi and not dry_run:
@@ -531,12 +573,29 @@ def orchestrate_reference_ingestion(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Import RIS records into Trellis and expand citations.")
-    parser.add_argument("path", nargs="?", default="data/endnote-extracted/PDF", help="RIS file or directory")
-    parser.add_argument("--seed-doi", default=None, help="Seed DOI for citation expansion")
-    parser.add_argument("--seed-title", default=None, help="Fallback title for seed lookup")
-    parser.add_argument("--max-hops", type=int, default=2, help="Citation expansion depth")
-    parser.add_argument("--dry-run", action="store_true", help="Parse and report without writing to Trellis")
+    parser = argparse.ArgumentParser(
+        description="Import RIS records into Trellis and expand citations."
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default="data/endnote-extracted/PDF",
+        help="RIS file or directory",
+    )
+    parser.add_argument(
+        "--seed-doi", default=None, help="Seed DOI for citation expansion"
+    )
+    parser.add_argument(
+        "--seed-title", default=None, help="Fallback title for seed lookup"
+    )
+    parser.add_argument(
+        "--max-hops", type=int, default=2, help="Citation expansion depth"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse and report without writing to Trellis",
+    )
     args = parser.parse_args()
 
     root = Path(args.path)
@@ -578,7 +637,9 @@ def main() -> int:
             else:
                 skipped += 1
 
-    print(f"Imported={imported} Skipped={skipped} Linked={linked} Files={len(ris_files)}")
+    print(
+        f"Imported={imported} Skipped={skipped} Linked={linked} Files={len(ris_files)}"
+    )
 
     if args.dry_run or (not args.seed_doi and not args.seed_title):
         return 0
@@ -596,7 +657,9 @@ def main() -> int:
 
     if not seed_doi and args.seed_title:
         # If the seed was found by title, try to recover a DOI from the imported cache.
-        seed_doi = next((doi for doi, slug in doi_cache.items() if slug == seed_slug), "")
+        seed_doi = next(
+            (doi for doi, slug in doi_cache.items() if slug == seed_slug), ""
+        )
 
     linked = expand_citations(
         seed_slug,

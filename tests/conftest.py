@@ -24,7 +24,9 @@ def ephemeral_trellis(tmp_path, monkeypatch):
     older ones, so a recent failure's graph stays inspectable.
     """
     try:
-        subprocess.run(["trellis", "--help"], capture_output=True, text=True, check=True)
+        subprocess.run(
+            ["trellis", "--help"], capture_output=True, text=True, check=True
+        )
     except (FileNotFoundError, subprocess.CalledProcessError):
         pytest.skip("trellis not available")
 
@@ -40,7 +42,11 @@ def ephemeral_trellis(tmp_path, monkeypatch):
 
     def _run(*args):
         return subprocess.run(
-            ["trellis", *args], cwd=str(workspace), capture_output=True, text=True, check=True
+            ["trellis", *args],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            check=True,
         )
 
     _run("init")
@@ -59,7 +65,9 @@ def pytest_collection_modifyitems(config, items):
     # exact-string match would mis-skip every form except bare "integration".
     if "integration" in (config.option.markexpr or ""):
         return
-    skip_integration = pytest.mark.skip(reason="integration test; run with -m integration")
+    skip_integration = pytest.mark.skip(
+        reason="integration test; run with -m integration"
+    )
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip_integration)

@@ -13,26 +13,33 @@ Phases:
 
 LLM-independent. No description field written. No stub nodes created.
 """
+
 from __future__ import annotations
 
-import dataclasses
 import concurrent.futures
+import dataclasses
 import json
 import logging
 import os
 import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 from datetime import date
-from typing import Optional, TYPE_CHECKING
-import xml.etree.ElementTree as ET
+from typing import TYPE_CHECKING, Optional
 
 import requests
 
-from pipeline._utils import bare_doi, canonical_type_tag, extend_unique, pub_type_slug, slugify
-from pipeline.citations import CitationResult, fetch_outbound_citations
-from pipeline._http import http_get, NCBI_LIMITER, S2_LIMITER, CROSSREF_LIMITER
 from pipeline import trellis
+from pipeline._http import CROSSREF_LIMITER, NCBI_LIMITER, S2_LIMITER, http_get
+from pipeline._utils import (
+    bare_doi,
+    canonical_type_tag,
+    extend_unique,
+    pub_type_slug,
+    slugify,
+)
+from pipeline.citations import CitationResult, fetch_outbound_citations
 
 if TYPE_CHECKING:
     from pipeline.aggregator import BatchResolved
@@ -201,7 +208,9 @@ def _prefer_canonical_doi(fields: dict, candidate_doi: Optional[str]) -> None:
     fields["doi"] = canonical
 
 
-def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) -> list[str]:
+def _make_tags(
+    resolved: ResolveResult, existing_tags: Optional[list] = None
+) -> list[str]:
     # Carry forward existing tags, dropping the pipeline:* marker (re-set below)
     # and healing any stale camelCase type:* tag so re-ingested nodes self-correct
     # the JournalArticle/journal-article duplication without a separate migration.
@@ -339,12 +348,18 @@ def _pubmed_fetch(pmid: str) -> dict:
     root = ET.fromstring(response.text)
 
     abstract_parts = [
-        text for text in (_element_text(element) for element in root.findall(".//AbstractText")) if text
+        text
+        for text in (
+            _element_text(element) for element in root.findall(".//AbstractText")
+        )
+        if text
     ]
     authors = []
     for author in root.findall(".//Author"):
         last_name = _element_text(author.find("LastName"))
-        fore_name = _element_text(author.find("ForeName")) or _element_text(author.find("Initials"))
+        fore_name = _element_text(author.find("ForeName")) or _element_text(
+            author.find("Initials")
+        )
         if last_name and fore_name:
             authors.append(f"{last_name} {fore_name}")
         elif last_name:
@@ -373,12 +388,17 @@ def _pubmed_fetch(pmid: str) -> dict:
 
     mesh = [
         text
-        for text in (_element_text(element) for element in root.findall(".//MeshHeading/DescriptorName"))
+        for text in (
+            _element_text(element)
+            for element in root.findall(".//MeshHeading/DescriptorName")
+        )
         if text
     ]
     keywords = [
         text
-        for text in (_element_text(element) for element in root.findall(".//KeywordList/Keyword"))
+        for text in (
+            _element_text(element) for element in root.findall(".//KeywordList/Keyword")
+        )
         if text
     ]
     mesh_major = []
@@ -388,20 +408,28 @@ def _pubmed_fetch(pmid: str) -> dict:
     for heading in root.findall(".//MeshHeading"):
         descriptor = heading.find("DescriptorName")
         descriptor_text = _element_text(descriptor)
-        descriptor_major = descriptor is not None and descriptor.get("MajorTopicYN") == "Y"
+        descriptor_major = (
+            descriptor is not None and descriptor.get("MajorTopicYN") == "Y"
+        )
         qualifier_major = any(
-            qualifier.get("MajorTopicYN") == "Y" for qualifier in heading.findall("QualifierName")
+            qualifier.get("MajorTopicYN") == "Y"
+            for qualifier in heading.findall("QualifierName")
         )
         if descriptor_text and (descriptor_major or qualifier_major):
             mesh_major.append(descriptor_text)
     mesh_qualifiers = [
         text
-        for text in (_element_text(element) for element in root.findall(".//MeshHeading/QualifierName"))
+        for text in (
+            _element_text(element)
+            for element in root.findall(".//MeshHeading/QualifierName")
+        )
         if text
     ]
     publication_types = [
         text
-        for text in (_element_text(element) for element in root.findall(".//PublicationType"))
+        for text in (
+            _element_text(element) for element in root.findall(".//PublicationType")
+        )
         if text
     ]
 
@@ -410,7 +438,8 @@ def _pubmed_fetch(pmid: str) -> dict:
         "abstract": " ".join(abstract_parts) or None,
         "authors": authors,
         "year": year,
-        "venue": _element_text(root.find(".//Journal/Title")) or _element_text(root.find(".//ISOAbbreviation")),
+        "venue": _element_text(root.find(".//Journal/Title"))
+        or _element_text(root.find(".//ISOAbbreviation")),
         "doi": doi,
         "pmid": fetched_pmid or pmid,
         "mesh": mesh,
@@ -443,9 +472,17 @@ def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
         )
         extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
         extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
-        extend_unique(fields.setdefault("mesh_major", []), fetched.get("mesh_major") or [])
-        extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
-        extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
+        extend_unique(
+            fields.setdefault("mesh_major", []), fetched.get("mesh_major") or []
+        )
+        extend_unique(
+            fields.setdefault("mesh_qualifiers", []),
+            fetched.get("mesh_qualifiers") or [],
+        )
+        extend_unique(
+            fields.setdefault("publication_types", []),
+            fetched.get("publication_types") or [],
+        )
         return "pubmed"
     except (requests.RequestException, ET.ParseError) as exc:
         identifier = parsed.pmid or parsed.doi or parsed.title
@@ -501,18 +538,27 @@ def _fill_from_s2(fields: dict) -> str:
         )
     )
     _prefer_canonical_doi(fields, external_ids.get("DOI"))
-    extend_unique(fields.setdefault("fields_of_study", []), payload.get("fieldsOfStudy") or [])
+    extend_unique(
+        fields.setdefault("fields_of_study", []), payload.get("fieldsOfStudy") or []
+    )
     extend_unique(
         fields.setdefault("fields_of_study", []),
-        [item.get("category") for item in payload.get("s2FieldsOfStudy") or [] if isinstance(item, dict)],
+        [
+            item.get("category")
+            for item in payload.get("s2FieldsOfStudy") or []
+            if isinstance(item, dict)
+        ],
     )
-    extend_unique(fields.setdefault("publication_types", []), payload.get("publicationTypes") or [])
+    extend_unique(
+        fields.setdefault("publication_types", []),
+        payload.get("publicationTypes") or [],
+    )
     return "semantic-scholar" if fields["source"] == "input-only" else fields["source"]
 
 
 def _crossref_year(msg: dict) -> Optional[str]:
     for key in ("published", "published-print", "published-online"):
-        parts = ((msg.get(key) or {}).get("date-parts") or [[]])
+        parts = (msg.get(key) or {}).get("date-parts") or [[]]
         if not parts or not parts[0]:
             continue
         year = parts[0][0]
@@ -569,7 +615,9 @@ def _fill_from_crossref(fields: dict) -> str:
     return "crossref" if fields["source"] == "input-only" else fields["source"]
 
 
-def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" = None) -> ResolveResult:
+def resolve_identity(
+    parsed: ParseResult, prefetched: "Optional[BatchResolved]" = None
+) -> ResolveResult:
     fields = {
         "title": parsed.title,
         "doi": parsed.doi,
@@ -615,8 +663,12 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
             )
         )
         _prefer_canonical_doi(fields, prefetched.doi)
-        extend_unique(fields.setdefault("fields_of_study", []), prefetched.fields_of_study)
-        extend_unique(fields.setdefault("publication_types", []), prefetched.publication_types)
+        extend_unique(
+            fields.setdefault("fields_of_study", []), prefetched.fields_of_study
+        )
+        extend_unique(
+            fields.setdefault("publication_types", []), prefetched.publication_types
+        )
         if any(
             [
                 prefetched.title,
@@ -641,13 +693,27 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
                         },
                     )
                 )
-                extend_unique(fields.setdefault("mesh_terms", []), fetched.get("mesh") or [])
-                extend_unique(fields.setdefault("keywords", []), fetched.get("keywords") or [])
-                extend_unique(fields.setdefault("mesh_major", []), fetched.get("mesh_major") or [])
-                extend_unique(fields.setdefault("mesh_qualifiers", []), fetched.get("mesh_qualifiers") or [])
-                extend_unique(fields.setdefault("publication_types", []), fetched.get("publication_types") or [])
+                extend_unique(
+                    fields.setdefault("mesh_terms", []), fetched.get("mesh") or []
+                )
+                extend_unique(
+                    fields.setdefault("keywords", []), fetched.get("keywords") or []
+                )
+                extend_unique(
+                    fields.setdefault("mesh_major", []), fetched.get("mesh_major") or []
+                )
+                extend_unique(
+                    fields.setdefault("mesh_qualifiers", []),
+                    fetched.get("mesh_qualifiers") or [],
+                )
+                extend_unique(
+                    fields.setdefault("publication_types", []),
+                    fetched.get("publication_types") or [],
+                )
             except (requests.RequestException, ET.ParseError) as exc:
-                logger.warning("resolve_identity prefetched pubmed pmid=%r failed: %s", pmid, exc)
+                logger.warning(
+                    "resolve_identity prefetched pubmed pmid=%r failed: %s", pmid, exc
+                )
                 pass
 
     needs_enrichment = any(
@@ -660,7 +726,9 @@ def resolve_identity(parsed: ParseResult, prefetched: "Optional[BatchResolved]" 
         ]
     )
     if not has_sufficient_title_only_metadata and (
-        prefetched is None or not _blank_to_none(fields.get("title")) or needs_enrichment
+        prefetched is None
+        or not _blank_to_none(fields.get("title"))
+        or needs_enrichment
     ):
         fields["source"] = _fill_from_pubmed(parsed, fields)
         fields["source"] = _fill_from_s2(fields)
@@ -749,10 +817,16 @@ def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
         slug = _node_slug(node)
         if not slug:
             raise RuntimeError("Trellis add did not return a slug")
-        trellis.annotate_node(slug, f"[{today}] Created via ingestion pipeline; source: {resolved.source}")
+        trellis.annotate_node(
+            slug, f"[{today}] Created via ingestion pipeline; source: {resolved.source}"
+        )
         return UpsertResult(slug=slug, created=True)
 
-    slug_or_id = dedup.existing_node.get("id") or dedup.existing_node.get("uuid") or dedup.existing_node.get("slug")
+    slug_or_id = (
+        dedup.existing_node.get("id")
+        or dedup.existing_node.get("uuid")
+        or dedup.existing_node.get("slug")
+    )
     if not slug_or_id:
         raise RuntimeError("Existing Trellis node has no slug or UUID")
     node = dedup.existing_node
@@ -769,7 +843,10 @@ def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
     )
     trellis.annotate_node(
         slug_or_id,
-        f"[{today}] Dedup match on {dedup.match_reason}; merged metadata; source: {resolved.source}",
+        (
+            f"[{today}] Dedup match on {dedup.match_reason}; "
+            f"merged metadata; source: {resolved.source}"
+        ),
     )
     return UpsertResult(slug=slug_or_id, created=False)
 
@@ -788,10 +865,14 @@ def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult
     return CitationStoreResult(stored=len(citations.items))
 
 
-def link_citations(slug: str, citations: CitationResult, index: dict = None) -> LinkResult:
+def link_citations(
+    slug: str, citations: CitationResult, index: dict = None
+) -> LinkResult:
     linked = 0
     skipped = 0
-    source_ref = slug if trellis._is_uuid(slug) else (trellis._resolve_to_uuid(slug) or slug)
+    source_ref = (
+        slug if trellis._is_uuid(slug) else (trellis._resolve_to_uuid(slug) or slug)
+    )
     for item in citations.items:
         if index is not None:
             target = trellis.dedup_check_indexed(
@@ -827,7 +908,7 @@ def link_citations(slug: str, citations: CitationResult, index: dict = None) -> 
 def verify_outcome(slug: str, edge_count: int = 0) -> VerifyResult:
     try:
         node = trellis.get_node(slug)
-        ref = ((node.get("metadata") or {}).get("reference") or {})
+        ref = (node.get("metadata") or {}).get("reference") or {}
         items = (ref.get("outbound_citations") or {}).get("items")
         pipeline_status = None
         for tag in node.get("tags") or []:
@@ -881,14 +962,18 @@ def ingest_reference_pipeline(raw: dict, prefetched=None) -> IngestionOutcome:
 def format_metrics_table(metrics: BatchMetrics) -> str:
     lines = [
         "Batch metrics",
-        f"  total: {metrics.total_seconds:.2f}s | workers: {metrics.workers} | nodes at index: {metrics.node_count_at_index}",
+        (
+            f"  total: {metrics.total_seconds:.2f}s | workers: {metrics.workers} | "
+            f"nodes at index: {metrics.node_count_at_index}"
+        ),
         "",
         f"  {'phase':<36} {'items':>7} {'wall':>10} {'per item':>10}",
         f"  {'-' * 36} {'-' * 7} {'-' * 10} {'-' * 10}",
     ]
     for phase in metrics.phases:
         lines.append(
-            f"  {phase.name:<36} {phase.items:>7} {phase.wall_seconds:>9.2f}s {phase.per_item_seconds:>9.2f}s"
+            f"  {phase.name:<36} {phase.items:>7} "
+            f"{phase.wall_seconds:>9.2f}s {phase.per_item_seconds:>9.2f}s"
         )
     return "\n".join(lines)
 
@@ -907,7 +992,9 @@ def resolve_and_upsert(
     try:
         outcome.parse = parse_input({"doi": doi})
         t0 = time.perf_counter()
-        outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched_for_doi(doi))
+        outcome.resolve = resolve_identity(
+            outcome.parse, prefetched=prefetched_for_doi(doi)
+        )
         resolve_elapsed = time.perf_counter() - t0
         outcome.dedup = find_existing_indexed(outcome.resolve, index)
         t0 = time.perf_counter()
@@ -1015,7 +1102,9 @@ _TOPICAL_TAG_PREFIXES = ("mesh:", "field:", "type:")
 
 
 def _has_topical_backfill_tags(node: dict) -> bool:
-    return any(str(tag).startswith(_TOPICAL_TAG_PREFIXES) for tag in node.get("tags") or [])
+    return any(
+        str(tag).startswith(_TOPICAL_TAG_PREFIXES) for tag in node.get("tags") or []
+    )
 
 
 def _doi_from_node(node: dict) -> Optional[str]:
@@ -1058,7 +1147,11 @@ def backfill_nodes(
     seen_candidates = set()
     for status in statuses:
         for node in trellis.get_by_pipeline_status(status):
-            identities = {value for value in (node.get("id"), node.get("uuid"), node.get("slug")) if value}
+            identities = {
+                value
+                for value in (node.get("id"), node.get("uuid"), node.get("slug"))
+                if value
+            }
             if not identities:
                 identities = {id(node)}
             if identities & seen_candidates:
@@ -1118,7 +1211,9 @@ def backfill_nodes(
     return all_outcomes, result
 
 
-def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutcome], BatchMetrics]:
+def ingest_batch(
+    dois: list[str], workers: int = 8
+) -> tuple[list[IngestionOutcome], BatchMetrics]:
     batch_t0 = time.perf_counter()
     phases: list[PhaseMetrics] = []
 
@@ -1173,7 +1268,9 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
         )
     elapsed = time.perf_counter() - t0
     add_phase("phase1 resolve+upsert", elapsed, len(dois))
-    add_phase("phase1 resolve_identity aggregate", sum(resolve_timings), len(resolve_timings))
+    add_phase(
+        "phase1 resolve_identity aggregate", sum(resolve_timings), len(resolve_timings)
+    )
     add_phase("phase1 upsert_node aggregate", sum(upsert_timings), len(upsert_timings))
 
     upserted = [result for result in phase1_results if result is not None]
@@ -1184,7 +1281,12 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
 
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(lambda item: reverse_materialize_upserted(item, outcomes, index), upserted))
+        list(
+            executor.map(
+                lambda item: reverse_materialize_upserted(item, outcomes, index),
+                upserted,
+            )
+        )
     elapsed = time.perf_counter() - t0
     add_phase("reverse materialize", elapsed, len(upserted))
 
@@ -1215,7 +1317,11 @@ def ingest_batch(dois: list[str], workers: int = 8) -> tuple[list[IngestionOutco
 
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(lambda item: set_final_pipeline_status(item, outcomes), upserted))
+        list(
+            executor.map(
+                lambda item: set_final_pipeline_status(item, outcomes), upserted
+            )
+        )
     elapsed = time.perf_counter() - t0
     add_phase("phase5 status", elapsed, len(upserted))
 
@@ -1238,7 +1344,9 @@ if __name__ == "__main__":
     parser.add_argument("--doi")
     parser.add_argument("--pmid")
     parser.add_argument("--title")
-    parser.add_argument("--batch-file", help="JSON file with list of DOIs to process in batch")
+    parser.add_argument(
+        "--batch-file", help="JSON file with list of DOIs to process in batch"
+    )
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
     if args.batch_file:
@@ -1251,8 +1359,14 @@ if __name__ == "__main__":
             "total": len(outcomes),
             "succeeded": sum(1 for outcome in outcomes if not outcome.errors),
             "failed": sum(1 for outcome in outcomes if outcome.errors),
-            "created": sum(1 for outcome in outcomes if outcome.upsert and outcome.upsert.created),
-            "updated": sum(1 for outcome in outcomes if outcome.upsert and not outcome.upsert.created),
+            "created": sum(
+                1 for outcome in outcomes if outcome.upsert and outcome.upsert.created
+            ),
+            "updated": sum(
+                1
+                for outcome in outcomes
+                if outcome.upsert and not outcome.upsert.created
+            ),
         }
         print(
             json.dumps(
@@ -1268,7 +1382,11 @@ if __name__ == "__main__":
         print()
         print(format_metrics_table(metrics))
         raise SystemExit(0)
-    raw = {k: v for k, v in {"doi": args.doi, "pmid": args.pmid, "title": args.title}.items() if v}
+    raw = {
+        k: v
+        for k, v in {"doi": args.doi, "pmid": args.pmid, "title": args.title}.items()
+        if v
+    }
     if not raw:
         parser.error("Provide at least one of --doi, --pmid, --title")
     outcome = ingest_reference_pipeline(raw)
