@@ -254,3 +254,49 @@ feeds the *old* scaffold lineage (`scripts/ingest.py`), not the new
   facets are wanted.
 - Slug normalization for `case-reports` (plural) vs `casereport`, and S2's
   combined `lettersandcomments` category, which have no clean PubMed twin.
+
+---
+
+## Enrichment: MeSH-tree denormalization (for RAG seeding)
+
+**Purpose.** The graph is built to **seed a RAG corpus** (offline), not for live
+graph retrieval. So enrichment optimizes for self-contained, richly-filterable
+per-paper export records — denormalize structure onto each paper rather than
+building navigable graph entities. (No concept nodes: those serve live traversal
+a RAG seed never does. The MeSH hierarchy is baked onto each paper as tags.)
+
+**Correctness rule (non-negotiable).** Key everything off the MeSH
+**DescriptorUI**, never the slugified term name. Searching MeSH by name
+mis-resolves common terms (observed: `Bacteria → Y05.070`, `Diet → Y11.010`,
+both wrong; `Obesity` returned a UID, not a tree number). PubMed already supplies
+the UI in each article's MeSH headings (`<DescriptorName UI="D001419">`); capture
+it at enrichment time and resolve tree numbers by UID.
+
+**Tag scheme — ancestor-expanded.** For each major MeSH heading, emit not just
+the leaf tree number but its whole ancestor chain + category, so the exported
+record is filterable at every taxonomic level with no graph traversal:
+```
+Gastrointestinal Microbiome (G06.591.375) ->
+  meshtree:G06.591.375  meshtree:G06.591  meshtree:G06  meshcat:G
+```
+Existing `mesh:` / `mesh-major:` *name* tags stay (human-readable); `meshtree:` /
+`meshcat:` are the machine-navigable layer. Ancestor expansion is pure prefix
+math — no extra API calls. (Tree numbers are a DAG: a term may have several, each
+expanded independently.) Optionally fold MeSH **entry terms** to collapse
+synonyms onto the canonical descriptor.
+
+**Promotion set.** Build tree tags from `mesh-major` (2,357 distinct after a
+MeSH check-tag stop-list — `Humans/Animals/Male/Female`, age bands, model-organism
+strains), not plain `mesh:` (polluted with check-tags).
+
+**Structure (3 files).**
+- `pipeline/mesh_tree.py` *(new)* — pure resolver `UID -> {tree_numbers,
+  ancestors[], category, canonical_name, entry_terms}`, backed by a cached
+  `data/mesh_tree_cache.json` (build-once, ~2.3k entries). Offline-testable.
+- `pipeline/ingestion.py` — capture `DescriptorUI` in the MeSH enrichment step;
+  emit ancestor-expanded `meshtree:` / `meshcat:` tags.
+- `scripts/backfill_mesh_tree.py` *(new)* — one-time retrofit over the digested
+  corpus, **anchored on `pmid:`** (re-fetch PubMed record -> UIDs -> tags), so
+  the existing papers get the same UID-based correctness.
+
+**Net effect.** Zero new nodes/edges; richer flat tags on existing papers.
