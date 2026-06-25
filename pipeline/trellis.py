@@ -4,10 +4,12 @@ Trellis CLI wrapper for the autonomous library agent pipeline.
 All mutations go through the trellis CLI. No LLM involvement here —
 this module is pure data transport between the pipeline and the graph store.
 """
+
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -15,19 +17,44 @@ import unicodedata
 from pathlib import Path
 from typing import Optional
 
-import os
-
 TRELLIS_BIN = "trellis"
-# Trellis workspace root — the directory containing .trellis/. Defaults to the
-# parent of the pipeline repo (LAD_library/ when cloned inside it).
-_DEFAULT_WORKSPACE = str(Path(__file__).resolve().parents[2])
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_CONFIG_PATH = _REPO_ROOT / "config.yml"
+# Default workspace — the directory above the repo (the "upper directory", i.e.
+# the library this agent sits next to). One agent serves many libraries; point it
+# at a specific one via config.yml's `workspace:` or the TRELLIS_WORKSPACE env var.
+_DEFAULT_WORKSPACE = str(_REPO_ROOT.parent)
+
+
+def _config_workspace() -> Optional[str]:
+    # Non-secret tuneable persisted by setup.sh. Read lazily and degrade
+    # gracefully (missing file / pyyaml absent) so the agent still runs on the
+    # default workspace even before setup has created config.yml.
+    try:
+        import yaml
+    except ImportError:
+        return None
+    try:
+        with open(_CONFIG_PATH) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    ws = cfg.get("workspace")
+    if ws and str(ws).strip():
+        return str(ws).strip()
+    return None
 
 
 def _workspace() -> str:
     # Resolved per call rather than frozen at import, so tests (and deploys) can
-    # repoint the Trellis workspace via TRELLIS_WORKSPACE — e.g. an ephemeral
-    # instance for integration tests — without reloading this module.
-    return os.environ.get("TRELLIS_WORKSPACE", _DEFAULT_WORKSPACE)
+    # repoint the workspace without reloading this module. Precedence:
+    #   TRELLIS_WORKSPACE env (explicit override: tests/CI/one-off)
+    #   -> config.yml `workspace:` (persisted by setup.sh)
+    #   -> default to the repo's parent directory.
+    env = os.environ.get("TRELLIS_WORKSPACE")
+    if env:
+        return env
+    return _config_workspace() or _DEFAULT_WORKSPACE
 
 
 # Back-compat module constant: the workspace as resolved at import time.
@@ -51,6 +78,7 @@ PIPELINE_TAGS = {
 # Subprocess primitives
 # ---------------------------------------------------------------------------
 
+
 def _run(*args: str) -> str:
     last_result = None
     for attempt in range(5):
@@ -64,7 +92,9 @@ def _run(*args: str) -> str:
             )
         except subprocess.TimeoutExpired as exc:
             command = " ".join([TRELLIS_BIN, *args])
-            raise RuntimeError(f"{command} timed out after {exc.timeout} seconds") from exc
+            raise RuntimeError(
+                f"{command} timed out after {exc.timeout} seconds"
+            ) from exc
         if result.returncode == 0:
             return result.stdout.strip()
 
@@ -73,7 +103,7 @@ def _run(*args: str) -> str:
         if "locked" not in combined and "busy" not in combined:
             break
         if attempt < 4:
-            time.sleep(0.1 * (2 ** attempt))
+            time.sleep(0.1 * (2**attempt))
 
     result = last_result
     if result is not None and result.returncode != 0:
@@ -120,7 +150,7 @@ def _normalize_doi_uri(s: str) -> str:
     lower = value.lower()
     for prefix in ("doi:", "https://doi.org/", "http://dx.doi.org/"):
         if lower.startswith(prefix):
-            value = value[len(prefix):]
+            value = value[len(prefix) :]
             break
     return f"https://doi.org/{value.strip()}"
 
@@ -131,7 +161,7 @@ def _doi_key(s: str) -> Optional[str]:
     prefix = "https://doi.org/"
     if not uri.startswith(prefix):
         return None
-    doi = uri[len(prefix):].strip().lower()
+    doi = uri[len(prefix) :].strip().lower()
     return doi or None
 
 
@@ -150,6 +180,7 @@ def _reference_metadata(node: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Read operations
 # ---------------------------------------------------------------------------
+
 
 def get_node(slug_or_uuid: str) -> dict:
     return _unwrap_node(_run_json("get", slug_or_uuid, "--json"))
@@ -195,6 +226,7 @@ def get_by_pipeline_status(status: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Batch index
 # ---------------------------------------------------------------------------
+
 
 def build_node_index() -> dict:
     """
@@ -250,7 +282,9 @@ def build_node_index() -> dict:
                     continue
                 citation_doi = _doi_key(item.get("doi", ""))
                 if citation_doi:
-                    index["pending_citations"].setdefault(citation_doi, []).append((source, node))
+                    index["pending_citations"].setdefault(citation_doi, []).append(
+                        (source, node)
+                    )
 
     return index
 
@@ -258,6 +292,7 @@ def build_node_index() -> dict:
 # ---------------------------------------------------------------------------
 # Write operations
 # ---------------------------------------------------------------------------
+
 
 def add_reference(
     title: str,
@@ -322,7 +357,9 @@ def update_node(
     return _unwrap_node(_run_json(*args))
 
 
-_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 
 
 def _is_uuid(s: str) -> bool:
@@ -358,13 +395,20 @@ def link_nodes(
         src_uuid = source if _is_uuid(source) else _resolve_to_uuid(source)
         tgt_uuid = target if _is_uuid(target) else _resolve_to_uuid(target)
         if not src_uuid or not tgt_uuid:
-            return {"ok": False, "error": f"Could not resolve UUIDs: src={source} tgt={target}"}
+            return {
+                "ok": False,
+                "error": f"Could not resolve UUIDs: src={source} tgt={target}",
+            }
         _run_json(
             "link",
-            "--source-uuid", src_uuid,
-            "--target-uuid", tgt_uuid,
-            "--relationship", relation,
-            "--actor-id", actor_id,
+            "--source-uuid",
+            src_uuid,
+            "--target-uuid",
+            tgt_uuid,
+            "--relationship",
+            relation,
+            "--actor-id",
+            actor_id,
             "--json",
         )
         return {"ok": True}
@@ -386,11 +430,14 @@ def annotate_node(slug_or_uuid: str, note: str, actor_id: str = ACTOR) -> dict:
 # Pipeline state
 # ---------------------------------------------------------------------------
 
+
 def set_pipeline_status(slug_or_uuid: str, status: str, actor_id: str = ACTOR) -> dict:
     """Replace the pipeline:* tag on a node, preserving all other tags."""
     new_tag = f"pipeline:{status}"
     if new_tag not in PIPELINE_TAGS:
-        raise ValueError(f"Unknown pipeline status {status!r}. Valid: {sorted(PIPELINE_TAGS)}")
+        raise ValueError(
+            f"Unknown pipeline status {status!r}. Valid: {sorted(PIPELINE_TAGS)}"
+        )
     node = get_node(slug_or_uuid)
     existing = node.get("tags") or []
     kept = [t for t in existing if not t.startswith("pipeline:")]
@@ -401,6 +448,7 @@ def set_pipeline_status(slug_or_uuid: str, status: str, actor_id: str = ACTOR) -
 # ---------------------------------------------------------------------------
 # Dedup chain
 # ---------------------------------------------------------------------------
+
 
 def find_by_s2id(s2id: str) -> Optional[dict]:
     nodes = find_nodes(tag=f"s2id:{s2id}")
@@ -413,7 +461,10 @@ def find_by_doi(doi: str) -> Optional[dict]:
     bare_doi = _doi_key(doi)
     candidates = find_nodes(text=uri)
     if bare_doi:
-        seen = {node.get("id") or node.get("uuid") or node.get("slug") for node in candidates}
+        seen = {
+            node.get("id") or node.get("uuid") or node.get("slug")
+            for node in candidates
+        }
         for node in find_nodes(text=bare_doi):
             identity = node.get("id") or node.get("uuid") or node.get("slug")
             if identity not in seen:
@@ -454,7 +505,9 @@ def reverse_materialize(
         return 0
 
     created = 0
-    for waiting_slug_or_id, _node in (index.get("pending_citations") or {}).get(key, []):
+    for waiting_slug_or_id, _node in (index.get("pending_citations") or {}).get(
+        key, []
+    ):
         if not waiting_slug_or_id or waiting_slug_or_id == new_slug:
             continue
         result = link_nodes(waiting_slug_or_id, new_slug, "references")

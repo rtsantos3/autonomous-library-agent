@@ -1,0 +1,11 @@
+# Tuneable settings for the autonomous library agent.
+# Secrets (API keys) live in .env — never here.
+#
+# setup.sh copies this to config.yml (gitignored) and prompts for the workspace.
+
+# Trellis workspace: the directory that holds .trellis/ — i.e. the target
+# library the agent ingests into. One agent serves many libraries; point it at a
+# specific one here. Blank → defaults to the parent directory of this repo (the
+# "upper directory"). The TRELLIS_WORKSPACE env var overrides this at runtime
+# (used by tests/CI and one-off runs).
+workspace:

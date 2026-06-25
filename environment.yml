@@ -15,4 +15,5 @@ dependencies:
   - python=3.10
   - requests
   - python-dotenv
+  - pyyaml
   - pytest

@@ -48,7 +48,36 @@ if [ -f .env ]; then
 else
   cp .env.example .env
   warn "created .env from .env.example — edit it and fill in your API keys"
-  warn "(TRELLIS_WORKSPACE left blank → default workspace: $WS_DEFAULT)"
+fi
+
+# 3b. config.yml + Trellis workspace (prompt once) -----------------------------
+#     Non-secret tuneables live in config.yml (secrets stay in .env). The
+#     workspace is the library directory the agent ingests into; one agent serves
+#     many libraries. Prompt for it once; default to the upper directory.
+say "Setting up config.yml"
+CFG="$REPO_ROOT/config.yml"
+if [ ! -f "$CFG" ]; then
+  cp config.yml.example "$CFG"
+  ok "created config.yml from config.yml.example"
+fi
+CONFIG_WS="$(sed -nE 's/^workspace:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | head -1 || true)"
+if [ -n "$CONFIG_WS" ]; then
+  ok "workspace already set in config.yml: $CONFIG_WS"
+else
+  if [ -t 0 ]; then
+    printf '  Trellis workspace — the library dir holding .trellis/ [%s]: ' "$WS_DEFAULT"
+    read -r WS_INPUT
+  else
+    WS_INPUT=""
+    warn "non-interactive shell; using default workspace"
+  fi
+  WS_SET="${WS_INPUT:-$WS_DEFAULT}"
+  if grep -qE '^workspace:' "$CFG"; then
+    sed -i -E "s|^workspace:.*|workspace: \"$WS_SET\"|" "$CFG"
+  else
+    printf 'workspace: "%s"\n' "$WS_SET" >> "$CFG"
+  fi
+  ok "workspace set in config.yml: $WS_SET"
 fi
 
 # 4. trellis CLI (verify only) -------------------------------------------------
@@ -61,9 +90,11 @@ fi
 
 # 5. Trellis workspace ---------------------------------------------------------
 #    The workspace is the directory Trellis runs in (it holds .trellis/).
-#    TRELLIS_WORKSPACE in .env wins; otherwise default to the repo root.
+#    Precedence matches pipeline/trellis.py: TRELLIS_WORKSPACE env wins, then
+#    config.yml `workspace:`, then the default (upper directory).
 say "Resolving Trellis workspace"
-WS="$(grep -E '^TRELLIS_WORKSPACE=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+WS="${TRELLIS_WORKSPACE:-}"
+[ -z "$WS" ] && WS="$(sed -nE 's/^workspace:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | head -1 || true)"
 WS="${WS:-$WS_DEFAULT}"
 ok "workspace: $WS"
 GRAPH_EXPORT="$WS/graph/trellis_export.jsonl"
