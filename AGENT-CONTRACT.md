@@ -1,4 +1,4 @@
-# AGENTS.md — Autonomous Microbiome Research Assistant
+# AGENT-CONTRACT.md — Autonomous Microbiome Research Assistant
 
 ## Identity and Runtime
 
