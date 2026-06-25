@@ -1,0 +1,161 @@
+# Pre-commit hooks for autonomous-library-agent
+# Prevents secrets, large files, images, ephemeral junk; enforces code quality.
+# Install: pre-commit install --config docs/.pre-commit-config.yaml
+# Run manually: pre-commit run --all-files --config docs/.pre-commit-config.yaml
+
+repos:
+  # ============================================================================
+  # PREVENT SECRETS & CREDENTIALS  (NCBI / S2 API keys must never be committed)
+  # ============================================================================
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        name: Detect secrets (API keys, tokens, passwords)
+        types_or: [python, yaml, json, markdown, text]
+        args: ['--baseline', '.secrets.baseline']
+        stages: [pre-commit]
+
+  # ============================================================================
+  # PREVENT LARGE FILES  (the SQLite db / JSONL export must not slip in)
+  # ============================================================================
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        name: Check for large files (>10MB)
+        args: ['--maxkb=10240']
+        stages: [pre-commit]
+
+  # ============================================================================
+  # PREVENT DEBUG STATEMENTS, LOCAL-ONLY NOTES, AND IMAGES
+  # ============================================================================
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: debug-statements
+        name: Check for debug statements (pdb, ipdb, breakpoint)
+        types: [python]
+
+  - repo: local
+    hooks:
+      # no-console-log omitted: this repo has no first-party JS, and the upstream
+      # hook greps the whole tree (incl. the setup/ conda env's vendored JS),
+      # producing false positives.
+      - id: block-agent-docs
+        name: Block committing AGENTS/CLAUDE/CODEX notes
+        entry: bash -c 'staged=$(git diff --cached --diff-filter=AM --name-only); for f in AGENTS.md CLAUDE.md .codex/CODEX.md; do echo "$staged" | grep -qx "$f" && { echo "Prevented committing $f (local-only)."; exit 1; }; done; exit 0'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: block-images
+        name: Block committing image files (png, jpg, jpeg, gif, svg, webp, bmp, tiff)
+        entry: >-
+          bash -c
+          'staged=$(git diff --cached --diff-filter=AM --name-only);
+          echo "$staged" | grep -qiE "\.(png|jpg|jpeg|gif|svg|webp|bmp|tiff?)$"
+          && { echo "ERROR: image files not allowed in commits.";
+          echo "$staged" | grep -iE "\.(png|jpg|jpeg|gif|svg|webp|bmp|tiff?)$";
+          exit 1; } || exit 0'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # ============================================================================
+  # PREVENT EPHEMERAL FILES & BASIC CHECKS
+  # ============================================================================
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+        types_or: [python, yaml, json, markdown]
+
+      - id: end-of-file-fixer
+        name: Fix end of file
+        types_or: [python, yaml, json, markdown]
+
+      - id: check-yaml
+        name: Check YAML syntax
+        types: [yaml]
+
+      - id: check-json
+        name: Check JSON syntax
+        types: [json]
+
+      - id: check-toml
+        name: Check TOML syntax
+        types: [toml]
+
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+
+      - id: check-case-conflict
+        name: Check for case conflicts in filenames
+
+  # ============================================================================
+  # PYTHON CODE QUALITY
+  # ============================================================================
+
+  - repo: https://github.com/psf/black
+    rev: 23.12.0
+    hooks:
+      - id: black
+        name: Format code with Black
+        types: [python]
+        language_version: python3
+        stages: [pre-commit]
+
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        name: Sort imports with isort
+        types: [python]
+        args: ['--profile', 'black']
+        stages: [pre-commit]
+
+  - repo: https://github.com/PyCQA/flake8
+    rev: 6.1.0
+    hooks:
+      - id: flake8
+        name: Lint Python with flake8
+        types: [python]
+        args: ['--max-line-length=100', '--extend-ignore=E203,W503']
+        stages: [pre-commit]
+
+  # ============================================================================
+  # JUPYTER NOTEBOOK CHECKS
+  # ============================================================================
+
+  # DISABLED: nbqa-black collapses notebook cell source into flat strings, breaking execution
+  # - repo: https://github.com/nbQA-dev/nbQA
+  #   rev: 1.7.1
+  #   hooks:
+  #     - id: nbqa-black
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Exclude generated / local / vendored paths (most are gitignored anyway).
+exclude: |
+  (?x)^(
+    \.git/|
+    setup/|
+    data/|
+    vault/|
+    graph/|
+    \.trellis/|
+    __pycache__/|
+    \.pytest_cache/|
+    tests/results/|
+    scripts/benchmarks/
+  )
+
+default_language_version:
+  python: python3
