@@ -29,7 +29,7 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from pipeline._utils import bare_doi, extend_unique, slugify
+from pipeline._utils import bare_doi, canonical_type_tag, extend_unique, pub_type_slug, slugify
 from pipeline.citations import CitationResult, fetch_outbound_citations
 from pipeline._http import http_get, NCBI_LIMITER, S2_LIMITER, CROSSREF_LIMITER
 from pipeline import trellis
@@ -202,7 +202,14 @@ def _prefer_canonical_doi(fields: dict, candidate_doi: Optional[str]) -> None:
 
 
 def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) -> list[str]:
-    tags = [t for t in (existing_tags or []) if not str(t).startswith("pipeline:")]
+    # Carry forward existing tags, dropping the pipeline:* marker (re-set below)
+    # and healing any stale camelCase type:* tag so re-ingested nodes self-correct
+    # the JournalArticle/journal-article duplication without a separate migration.
+    tags = [
+        canonical_type_tag(t)
+        for t in (existing_tags or [])
+        if not str(t).startswith("pipeline:")
+    ]
     tags.append("pipeline:scaffolded")
     if resolved.s2_id:
         tags.append(f"s2id:{resolved.s2_id}")
@@ -215,7 +222,7 @@ def _make_tags(resolved: ResolveResult, existing_tags: Optional[list] = None) ->
         if slug:
             tags.append(f"field:{slug}")
     for value in resolved.publication_types:
-        slug = slugify(value)
+        slug = pub_type_slug(value)
         if slug:
             tags.append(f"type:{slug}")
     for value in resolved.mesh_terms:
