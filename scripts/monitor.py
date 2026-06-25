@@ -82,8 +82,26 @@ def query_stats() -> dict:
             "SELECT timestamp, operation, entity_type FROM mutation_log "
             "ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
+        # Soft-deleted nodes keep their row (status='deleted') and their
+        # pipeline:* tag_links; exclude them so counts reflect the live graph.
+        pipeline = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT substr(t.tag, 10) AS status, COUNT(*) "
+                "FROM tag_links t JOIN nodes n ON n.id = t.owner_id "
+                "WHERE t.tag LIKE 'pipeline:%' "
+                "AND COALESCE(n.status, '') != 'deleted' "
+                "GROUP BY t.tag ORDER BY 2 DESC"
+            ).fetchall()
+        }
         return {
-            "nodes": scalar("SELECT COUNT(*) FROM nodes"),
+            "nodes": scalar(
+                "SELECT COUNT(*) FROM nodes WHERE COALESCE(status, '') != 'deleted'"
+            ),
+            "nodes_deleted": scalar(
+                "SELECT COUNT(*) FROM nodes WHERE status = 'deleted'"
+            ),
+            "pipeline": pipeline,
             "edges_total": scalar("SELECT COUNT(*) FROM edges"),
             "references_edges": scalar(
                 "SELECT COUNT(*) FROM edges WHERE relationship='references'"
