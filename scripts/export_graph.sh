@@ -51,17 +51,23 @@ src, dst = sys.argv[1], sys.argv[2]
 KEEP = {"node", "edge", "annotation"}
 kept = dropped = 0
 with open(src) as fi, open(dst, "w") as fo:
-    for line in fi:
+    for lineno, line in enumerate(fi, 1):
         try:
-            kind = json.loads(line).get("kind")
-        except json.JSONDecodeError:
-            dropped += 1
-            continue
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"ERROR: unparseable export line {lineno}: {line.rstrip()}", file=sys.stderr)
+            print(f"JSON error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        kind = record.get("kind")
         if kind in KEEP:
             fo.write(line)
             kept += 1
-        else:
+        elif "kind" not in record and ("record_type" in record or "operation" in record):
             dropped += 1
+        else:
+            print(f"ERROR: unknown export record at line {lineno}: {json.dumps(record, sort_keys=True)}", file=sys.stderr)
+            sys.exit(1)
 print(f"slim export: kept {kept} graph records, dropped {dropped} mutation_log records")
 PY
 

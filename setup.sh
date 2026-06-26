@@ -101,10 +101,31 @@ fi
 
 # 5. Trellis workspace ---------------------------------------------------------
 #    The workspace is the directory Trellis runs in (it holds .trellis/).
-#    Precedence matches pipeline/trellis.py: TRELLIS_WORKSPACE env wins, then
-#    config.yml `workspace:`, then the default (upper directory).
+#    Precedence: live TRELLIS_WORKSPACE env, then .env's TRELLIS_WORKSPACE,
+#    then config.yml `workspace:`, then the default (upper directory).
 say "Resolving Trellis workspace"
 WS="${TRELLIS_WORKSPACE:-}"
+if [ -z "$WS" ] && [ -f .env ]; then
+  # Read .env as data, not shell: KEY=VALUE lines only; comments ignored.
+  WS="$(awk -F= '
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+    {
+      key = $1
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*$/, "", key)
+      if (key == "TRELLIS_WORKSPACE") {
+        val = substr($0, index($0, "=") + 1)
+        sub(/^[[:space:]]*/, "", val)
+        sub(/[[:space:]]*$/, "", val)
+        if ((val ~ /^".*"$/) || (val ~ /^'\''.*'\''$/)) {
+          val = substr(val, 2, length(val) - 2)
+        }
+        print val
+        exit
+      }
+    }
+  ' .env)"
+fi
 [ -z "$WS" ] && WS="$(sed -nE 's/^workspace:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | head -1 || true)"
 WS="${WS:-$WS_DEFAULT}"
 ok "workspace: $WS"
