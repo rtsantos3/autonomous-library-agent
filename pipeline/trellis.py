@@ -505,10 +505,22 @@ def reverse_materialize(
         return 0
 
     created = 0
+    new_uuid = new_slug if _is_uuid(new_slug) else _resolve_to_uuid(new_slug)
     for waiting_slug_or_id, _node in (index.get("pending_citations") or {}).get(
         key, []
     ):
-        if not waiting_slug_or_id or waiting_slug_or_id == new_slug:
+        if not waiting_slug_or_id:
+            continue
+        waiting_uuid = None
+        if new_uuid and _is_uuid(new_uuid):
+            waiting_uuid = (
+                waiting_slug_or_id
+                if _is_uuid(waiting_slug_or_id)
+                else _resolve_to_uuid(waiting_slug_or_id)
+            )
+        if (
+            waiting_uuid and waiting_uuid == new_uuid
+        ) or waiting_slug_or_id == new_slug:
             continue
         result = link_nodes(waiting_slug_or_id, new_slug, "references")
         if result.get("ok"):

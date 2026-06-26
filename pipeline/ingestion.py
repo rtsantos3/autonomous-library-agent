@@ -209,27 +209,32 @@ def _prefer_canonical_doi(fields: dict, candidate_doi: Optional[str]) -> None:
 
 
 def _make_tags(
-    resolved: ResolveResult, existing_tags: Optional[list] = None
+    resolved: ResolveResult,
+    existing_tags: Optional[list] = None,
+    own_reference: Optional[dict] = None,
 ) -> list[str]:
     # Carry forward existing tags, dropping the pipeline:* marker (re-set below)
     # and healing any stale camelCase type:* tag so re-ingested nodes self-correct
     # the JournalArticle/journal-article duplication without a separate migration.
     #
     # Also drop carried-forward s2id:/pmid: identity tags: these must describe THIS
-    # node only and are re-derived from `resolved` below. Carrying them forward let
-    # a stray identifier (e.g. inherited during a duplicate-node merge) persist and
-    # accumulate, so build_node_index mis-routed citations onto the wrong node. See
-    # scripts/migrations/decontaminate_identity_tags.py for the one-time cleanup.
+    # node only and are re-derived below. During degraded re-ingests, `resolved`
+    # may be missing identifiers, so fall back to the node's merged reference
+    # metadata: that is the authoritative own identity and avoids preserving
+    # foreign carried tags that would mis-route build_node_index lookups.
     tags = [
         canonical_type_tag(t)
         for t in (existing_tags or [])
         if not str(t).startswith(("pipeline:", "s2id:", "pmid:"))
     ]
+    own_reference = own_reference or {}
+    own_s2_id = resolved.s2_id or _blank_to_none(own_reference.get("s2_id"))
+    own_pmid = resolved.pmid or _blank_to_none(own_reference.get("pmid"))
     tags.append("pipeline:scaffolded")
-    if resolved.s2_id:
-        tags.append(f"s2id:{resolved.s2_id}")
-    if resolved.pmid:
-        tags.append(f"pmid:{resolved.pmid}")
+    if own_s2_id:
+        tags.append(f"s2id:{own_s2_id}")
+    if own_pmid:
+        tags.append(f"pmid:{own_pmid}")
     if resolved.year:
         tags.append(f"year:{resolved.year}")
     for value in resolved.fields_of_study:
@@ -841,10 +846,11 @@ def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
     current_meta = dict(node.get("metadata") or {})
     current_ref = dict(current_meta.get("reference") or {})
     current_meta["reference"] = _merge_missing(current_ref, metadata["reference"])
+    tags = _make_tags(resolved, node.get("tags") or [], current_meta["reference"])
     trellis.update_node(
         slug_or_id,
         metadata=current_meta,
-        tags=_make_tags(resolved, node.get("tags") or []),
+        tags=tags,
         citation=citation,
     )
     trellis.annotate_node(
@@ -876,9 +882,8 @@ def link_citations(
 ) -> LinkResult:
     linked = 0
     skipped = 0
-    source_ref = (
-        slug if trellis._is_uuid(slug) else (trellis._resolve_to_uuid(slug) or slug)
-    )
+    source_uuid = slug if trellis._is_uuid(slug) else trellis._resolve_to_uuid(slug)
+    source_ref = source_uuid or slug
     for item in citations.items:
         if index is not None:
             target = trellis.dedup_check_indexed(
@@ -903,11 +908,22 @@ def link_citations(
         if not target_slug:
             skipped += 1
             continue
+        target_uuid = None
+        if source_uuid and trellis._is_uuid(source_uuid):
+            target_uuid = (
+                target_slug
+                if trellis._is_uuid(target_slug)
+                else trellis._resolve_to_uuid(target_slug)
+            )
         # Never link a paper to itself. A reference item with no stable identifier
         # falls through to title matching and can resolve back to the source node
         # (e.g. an S2 reference list that echoes the paper's own title), producing
         # a spurious self-citation edge.
-        if target_slug == source_ref or _node_slug(target) == slug:
+        if (
+            (target_uuid and source_uuid == target_uuid)
+            or target_slug == source_ref
+            or _node_slug(target) == slug
+        ):
             skipped += 1
             continue
         result = trellis.link_nodes(source_ref, target_slug, "references")

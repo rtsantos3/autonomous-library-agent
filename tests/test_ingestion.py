@@ -545,6 +545,35 @@ class TestIngestionUnit:
         assert metadata["other"] == {"x": 1}
         get_node.assert_not_called()
 
+    def test_upsert_degraded_reingest_keeps_own_identity_and_drops_foreign_tags(self):
+        existing_node = {
+            "slug": "old",
+            "metadata": {
+                "reference": {
+                    "doi": "10.1/x",
+                    "s2_id": "own-s2",
+                    "pmid": "own-pmid",
+                }
+            },
+            "tags": [
+                "pipeline:queued",
+                "source:manual",
+                "s2id:foreign-s2",
+                "pmid:foreign-pmid",
+            ],
+        }
+        degraded = resolved(s2_id=None, pmid=None)
+        with patch(
+            "pipeline.ingestion.trellis.update_node", return_value=existing_node
+        ) as update, patch("pipeline.ingestion.trellis.annotate_node"):
+            ingestion.upsert_node(degraded, DedupResult(existing_node, "title"))
+
+        tags = update.call_args.kwargs["tags"]
+        assert "s2id:own-s2" in tags
+        assert "pmid:own-pmid" in tags
+        assert "s2id:foreign-s2" not in tags
+        assert "pmid:foreign-pmid" not in tags
+
     def test_upsert_existing_node_empty_metadata_produces_reference_metadata(self):
         existing_node = {"slug": "old", "metadata": {}, "tags": []}
         with patch("pipeline.ingestion.trellis.get_node") as get_node, patch(
@@ -822,6 +851,26 @@ class TestIngestionUnit:
         assert result.skipped == 1
         link.assert_not_called()
 
+    def test_link_citations_skips_self_reference_when_source_uuid_target_slug(self):
+        citations = citation_result(
+            [CitationItem(None, None, None, "Source Paper", 2020)]
+        )
+        source_uuid = "11111111-1111-1111-1111-111111111111"
+        with patch(
+            "pipeline.ingestion.trellis.dedup_check",
+            return_value={"slug": "source-paper-renamed"},
+        ), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid",
+            side_effect=[source_uuid, source_uuid],
+        ), patch(
+            "pipeline.ingestion.trellis.link_nodes",
+            return_value={"ok": True},
+        ) as link:
+            result = ingestion.link_citations("source-paper", citations)
+
+        assert result == ingestion.LinkResult(linked=0, skipped=1)
+        link.assert_not_called()
+
     def test_link_batch_counts_found_and_unfound_citations(self):
         citations = citation_result(
             [
@@ -852,6 +901,21 @@ class TestIngestionUnit:
             result = ingestion.link_citations("source", citations)
         dedup.assert_called_once_with(s2id="s2-only", doi=None, pmid=None, title="")
         assert result.skipped == 1
+
+    def test_reverse_materialize_skips_self_link_when_waiting_slug_matches_new_uuid(
+        self,
+    ):
+        node_uuid = "11111111-1111-1111-1111-111111111111"
+        index = {"pending_citations": {"10.1/x": [("same-paper", {})]}}
+        with patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value=node_uuid
+        ), patch("pipeline.ingestion.trellis.link_nodes") as link:
+            created = ingestion.trellis.reverse_materialize(
+                node_uuid, doi="10.1/x", index=index
+            )
+
+        assert created == 0
+        link.assert_not_called()
 
     def test_link_with_index_uses_indexed_dedup_prefers_identifier_and_skips_unidentified_targets(
         self,
