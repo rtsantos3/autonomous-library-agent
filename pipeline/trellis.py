@@ -387,6 +387,11 @@ def _trellis_db_path() -> Path:
     return Path(_workspace()) / ".trellis" / "trellis.db"
 
 
+def _is_locked_or_busy(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
 def build_edge_index() -> set[tuple[str, str, str]]:
     """
     Read all Trellis edges directly from SQLite.
@@ -398,14 +403,18 @@ def build_edge_index() -> set[tuple[str, str, str]]:
     path = _trellis_db_path()
     if not path.exists():
         return set()
-    try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-            rows = conn.execute(
-                "SELECT source_id,target_id,relationship FROM edges"
-            ).fetchall()
-    except sqlite3.Error as exc:
-        logger.warning("build_edge_index failed for %s: %s", path, exc)
-        raise
+    for attempt in range(5):
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+                rows = conn.execute(
+                    "SELECT source_id,target_id,relationship FROM edges"
+                ).fetchall()
+            break
+        except sqlite3.Error as exc:
+            if not _is_locked_or_busy(exc) or attempt == 4:
+                logger.warning("build_edge_index failed for %s: %s", path, exc)
+                raise
+            time.sleep(0.1 * (2**attempt))
     return {
         (_uuid_hex(source_id), _uuid_hex(target_id), relationship)
         for source_id, target_id, relationship in rows
@@ -422,20 +431,24 @@ def _edge_exists(src_uuid: str, tgt_uuid: str, relationship: str) -> bool:
     path = _trellis_db_path()
     if not path.exists():
         return False
-    try:
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-            row = conn.execute(
-                """
-                SELECT 1
-                FROM edges
-                WHERE source_id = ? AND target_id = ? AND relationship = ?
-                LIMIT 1
-                """,
-                (_uuid_hex(src_uuid), _uuid_hex(tgt_uuid), relationship),
-            ).fetchone()
-    except sqlite3.Error as exc:
-        logger.warning("_edge_exists failed for %s: %s", path, exc)
-        raise
+    for attempt in range(5):
+        try:
+            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM edges
+                    WHERE source_id = ? AND target_id = ? AND relationship = ?
+                    LIMIT 1
+                    """,
+                    (_uuid_hex(src_uuid), _uuid_hex(tgt_uuid), relationship),
+                ).fetchone()
+            break
+        except sqlite3.Error as exc:
+            if not _is_locked_or_busy(exc) or attempt == 4:
+                logger.warning("_edge_exists failed for %s: %s", path, exc)
+                raise
+            time.sleep(0.1 * (2**attempt))
     return row is not None
 
 
@@ -501,7 +514,7 @@ def link_nodes(
             "--json",
         )
         return {"ok": True}
-    except RuntimeError as e:
+    except Exception as e:
         if reserved and edge_index is not None and key is not None:
             lock_context = (
                 edge_lock if edge_lock is not None else contextlib.nullcontext()

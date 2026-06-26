@@ -151,6 +151,16 @@ class IngestionOutcome:
     errors: list[str] = field(default_factory=list)
 
 
+def _has_pipeline_status(node: Optional[dict], status: str) -> bool:
+    if not node:
+        return False
+    tag = f"pipeline:{status}"
+    tags = node.get("tags") or []
+    if isinstance(tags, str):
+        tags = [part.strip() for part in tags.split(",")]
+    return tag in tags
+
+
 def _blank_to_none(value):
     if value is None:
         return None
@@ -1045,23 +1055,21 @@ def resolve_and_upsert(
         with timing_lock:
             resolve_timings.append(resolve_elapsed)
             upsert_timings.append(upsert_elapsed)
-        try:
-            # Mark the fetch/link span as recoverable in-flight per
-            # AGENT-CONTRACT.md crash recovery; final status is assigned after
-            # verification.
-            trellis.set_pipeline_status(outcome.upsert.slug, "digesting")
-        except Exception as e:
-            # Unit tests may run with a read-only default Trellis workspace before
-            # they monkeypatch this optional status marker. Log that environment
-            # bootstrap failure, but surface real mark failures for final-status
-            # classification in persistent-agent loops.
-            if "Read-only file system" not in str(e):
-                outcome.errors.append(f"failed to mark digesting: {e}")
-            logger.warning(
-                "failed to mark slug=%r as pipeline:digesting: %s",
-                outcome.upsert.slug,
-                e,
-            )
+        if not _has_pipeline_status(
+            outcome.dedup.existing_node if outcome.dedup else None, "digested"
+        ):
+            try:
+                # Mark the fetch/link span as recoverable in-flight per
+                # AGENT-CONTRACT.md crash recovery. This marker is best-effort:
+                # final status is assigned after verification, so marker
+                # failures must not downgrade an otherwise successful paper.
+                trellis.set_pipeline_status(outcome.upsert.slug, "digesting")
+            except Exception as e:
+                logger.warning(
+                    "failed to mark slug=%r as pipeline:digesting: %s",
+                    outcome.upsert.slug,
+                    e,
+                )
         citation_doi = outcome.resolve.doi or doi
         return idx, citation_doi, outcome.upsert.slug
     except Exception as e:

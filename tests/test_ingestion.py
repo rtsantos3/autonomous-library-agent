@@ -1449,11 +1449,12 @@ class TestIngestionUnit:
         assert node_index.call_count == 2
         link.assert_called_once_with("source", citations, index={})
 
-    def test_resolve_and_upsert_records_digesting_mark_failure(self):
+    def test_resolve_and_upsert_logs_digesting_mark_failure(self, caplog):
         outcome = ingestion.IngestionOutcome()
         resolve_timings = []
         upsert_timings = []
 
+        caplog.set_level("WARNING", logger="pipeline.ingestion")
         with patch(
             "pipeline.ingestion.resolve_identity", return_value=resolved()
         ), patch(
@@ -1475,7 +1476,39 @@ class TestIngestionUnit:
             )
 
         assert result == (0, "10.1/x", "source")
-        assert outcome.errors == ["failed to mark digesting: status write failed"]
+        assert outcome.errors == []
+        assert "failed to mark slug='source' as pipeline:digesting" in caplog.text
+
+    def test_resolve_and_upsert_skips_digesting_mark_for_already_digested_dedup(self):
+        outcome = ingestion.IngestionOutcome()
+        resolve_timings = []
+        upsert_timings = []
+        existing = {"slug": "source", "tags": ["pipeline:digested"]}
+
+        with patch(
+            "pipeline.ingestion.resolve_identity", return_value=resolved()
+        ), patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=existing
+        ), patch(
+            "pipeline.ingestion.upsert_node",
+            return_value=UpsertResult("source", False),
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ) as set_status:
+            result = ingestion.resolve_and_upsert(
+                (0, "10.1/x"),
+                [outcome],
+                lambda _doi: None,
+                resolve_timings,
+                upsert_timings,
+                ingestion.threading.Lock(),
+                {},
+            )
+
+        assert result == (0, "10.1/x", "source")
+        assert outcome.errors == []
+        assert outcome.dedup == DedupResult(existing, "s2_id")
+        set_status.assert_not_called()
 
     def test_resolve_and_upsert_failure_does_not_mark_digesting(self):
         outcome = ingestion.IngestionOutcome()

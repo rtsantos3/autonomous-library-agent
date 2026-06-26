@@ -4,7 +4,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -498,6 +498,34 @@ def test_link_nodes_reserves_edge_index_key_before_linking():
     )
 
 
+def test_link_nodes_discards_reserved_key_on_non_runtime_error():
+    edge_index = set()
+
+    with patch(
+        "pipeline.trellis._run_json",
+        side_effect=json.JSONDecodeError("bad json", "{", 0),
+    ):
+        result = trellis.link_nodes(
+            UUID_SOURCE, UUID_TARGET, "references", edge_index=edge_index
+        )
+
+    assert result["ok"] is False
+    assert "bad json" in result["error"]
+    assert edge_index == set()
+
+
+def test_link_nodes_treats_non_runtime_duplicate_as_idempotent():
+    edge_index = set()
+
+    with patch("pipeline.trellis._run_json", side_effect=ValueError("duplicate edge")):
+        result = trellis.link_nodes(
+            UUID_SOURCE, UUID_TARGET, "references", edge_index=edge_index
+        )
+
+    assert result == {"ok": True, "idempotent": True}
+    assert edge_index == set()
+
+
 def test_link_nodes_idempotent_when_direct_edge_lookup_finds_existing_edge():
     with patch("pipeline.trellis._edge_exists", return_value=True) as exists, patch(
         "pipeline.trellis._run_json", side_effect=AssertionError
@@ -507,6 +535,44 @@ def test_link_nodes_idempotent_when_direct_edge_lookup_finds_existing_edge():
     assert result == {"ok": True, "idempotent": True}
     exists.assert_called_once_with(UUID_SOURCE, UUID_TARGET, "references")
     run.assert_not_called()
+
+
+def test_edge_exists_retries_locked_sqlite_read(tmp_path):
+    path = tmp_path / "trellis.db"
+    path.touch()
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.execute.return_value.fetchone.return_value = (1,)
+
+    with patch("pipeline.trellis._trellis_db_path", return_value=path), patch(
+        "pipeline.trellis.sqlite3.connect",
+        side_effect=[sqlite3.OperationalError("database is locked"), conn],
+    ) as connect, patch("pipeline.trellis.time.sleep") as sleep:
+        assert trellis._edge_exists(UUID_SOURCE, UUID_TARGET, "references") is True
+
+    assert connect.call_count == 2
+    sleep.assert_called_once_with(0.1)
+
+
+def test_build_edge_index_retries_busy_sqlite_read(tmp_path):
+    path = tmp_path / "trellis.db"
+    path.touch()
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.execute.return_value.fetchall.return_value = [
+        (UUID_SOURCE, UUID_TARGET, "references")
+    ]
+
+    with patch("pipeline.trellis._trellis_db_path", return_value=path), patch(
+        "pipeline.trellis.sqlite3.connect",
+        side_effect=[sqlite3.OperationalError("database busy"), conn],
+    ) as connect, patch("pipeline.trellis.time.sleep") as sleep:
+        assert trellis.build_edge_index() == {
+            (UUID_SOURCE.replace("-", ""), UUID_TARGET.replace("-", ""), "references")
+        }
+
+    assert connect.call_count == 2
+    sleep.assert_called_once_with(0.1)
 
 
 def test_link_nodes_fails_closed_when_direct_edge_lookup_fails():
