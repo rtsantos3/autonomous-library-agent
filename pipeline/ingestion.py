@@ -214,10 +214,16 @@ def _make_tags(
     # Carry forward existing tags, dropping the pipeline:* marker (re-set below)
     # and healing any stale camelCase type:* tag so re-ingested nodes self-correct
     # the JournalArticle/journal-article duplication without a separate migration.
+    #
+    # Also drop carried-forward s2id:/pmid: identity tags: these must describe THIS
+    # node only and are re-derived from `resolved` below. Carrying them forward let
+    # a stray identifier (e.g. inherited during a duplicate-node merge) persist and
+    # accumulate, so build_node_index mis-routed citations onto the wrong node. See
+    # scripts/migrations/decontaminate_identity_tags.py for the one-time cleanup.
     tags = [
         canonical_type_tag(t)
         for t in (existing_tags or [])
-        if not str(t).startswith("pipeline:")
+        if not str(t).startswith(("pipeline:", "s2id:", "pmid:"))
     ]
     tags.append("pipeline:scaffolded")
     if resolved.s2_id:
