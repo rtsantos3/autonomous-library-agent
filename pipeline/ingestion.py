@@ -1040,6 +1040,17 @@ def resolve_and_upsert(
         with timing_lock:
             resolve_timings.append(resolve_elapsed)
             upsert_timings.append(upsert_elapsed)
+        try:
+            # Mark the fetch/link span as recoverable in-flight per
+            # AGENT-CONTRACT.md crash recovery; final status is assigned after
+            # verification.
+            trellis.set_pipeline_status(outcome.upsert.slug, "digesting")
+        except Exception as e:
+            logger.warning(
+                "failed to mark slug=%r as pipeline:digesting: %s",
+                outcome.upsert.slug,
+                e,
+            )
         citation_doi = outcome.resolve.doi or doi
         return idx, citation_doi, outcome.upsert.slug
     except Exception as e:

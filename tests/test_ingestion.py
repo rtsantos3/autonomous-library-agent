@@ -1,7 +1,7 @@
 import sys
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 import requests
@@ -1370,6 +1370,69 @@ class TestIngestionUnit:
         assert outcome.upsert.slug == "source"
         add.assert_called_once()
         grep_nodes.assert_not_called()
+
+    def test_batch_success_marks_digesting_before_terminal_status(self):
+        with patch("pipeline.aggregator.batch_resolve", return_value={}), patch(
+            "pipeline.ingestion.resolve_identity", return_value=resolved()
+        ), patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=None
+        ), patch(
+            "pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ) as set_status, patch(
+            "pipeline.ingestion.trellis.build_node_index", return_value={}
+        ), patch(
+            "pipeline.ingestion.trellis.reverse_materialize"
+        ), patch(
+            "pipeline.ingestion.fetch_outbound_citations",
+            return_value=citation_result(),
+        ), patch(
+            "pipeline.ingestion.store_citations",
+            return_value=ingestion.CitationStoreResult(0),
+        ), patch(
+            "pipeline.ingestion.trellis.build_edge_index", return_value=set()
+        ), patch(
+            "pipeline.ingestion.link_citations",
+            return_value=ingestion.LinkResult(0, 0),
+        ), patch(
+            "pipeline.ingestion.verify_outcome",
+            return_value=ingestion.VerifyResult(True, True, "digesting", 0),
+        ):
+            outcomes, _metrics = ingestion.ingest_batch(["10.1/x"], workers=1)
+
+        assert outcomes[0].errors == []
+        assert set_status.call_args_list == [
+            call("source", "digesting"),
+            call("source", "digested"),
+        ]
+
+    def test_resolve_and_upsert_failure_does_not_mark_digesting(self):
+        outcome = ingestion.IngestionOutcome()
+        timings = []
+
+        with patch(
+            "pipeline.ingestion.resolve_identity", return_value=resolved()
+        ), patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=None
+        ), patch(
+            "pipeline.ingestion.upsert_node", side_effect=RuntimeError("upsert failed")
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ) as set_status:
+            result = ingestion.resolve_and_upsert(
+                (0, "10.1/x"),
+                [outcome],
+                lambda _doi: None,
+                timings,
+                timings,
+                ingestion.threading.Lock(),
+                {},
+            )
+
+        assert result is None
+        assert outcome.errors == ["upsert failed"]
+        set_status.assert_not_called()
 
 
 @pytest.mark.integration
