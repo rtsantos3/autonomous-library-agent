@@ -16,8 +16,16 @@ Idempotent: if DOI already exists, returns existing slug without re-adding.
 import json
 import re
 import subprocess
+import sys
 import unicodedata
+from pathlib import Path
 from typing import Optional
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from pipeline.trellis import TRELLIS_BIN, _workspace  # noqa: E402
 
 PIPELINE_TAGS = [
     "pipeline:queued",
@@ -57,10 +65,13 @@ def _norm_title(t: str) -> str:
 
 def _trellis(*args: str, json_output: bool = True) -> subprocess.CompletedProcess:
     """Run a trellis CLI command."""
-    cmd = ["trellis"] + list(args)
+    cmd = [TRELLIS_BIN] + list(args)
     if json_output and "--json" not in cmd:
         cmd.append("--json")
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    # Trellis calls target the resolved workspace, not the ambient cwd.
+    return subprocess.run(
+        cmd, cwd=_workspace(), capture_output=True, text=True, timeout=15
+    )
 
 
 def _doi_exists(doi: str) -> Optional[str]:
@@ -261,7 +272,7 @@ def ingest_paper(
 
     # --- Build command ---
     cmd = [
-        "trellis",
+        TRELLIS_BIN,
         "add",
         "reference",
         paper_title,
@@ -283,7 +294,10 @@ def ingest_paper(
     )
 
     # --- Execute ---
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    # Trellis calls target the resolved workspace, not the ambient cwd.
+    r = subprocess.run(
+        cmd, cwd=_workspace(), capture_output=True, text=True, timeout=15
+    )
 
     if r.returncode == 0:
         try:

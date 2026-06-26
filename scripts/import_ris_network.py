@@ -30,11 +30,13 @@ import requests
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from ingest import ingest_paper, load_existing_dois, load_existing_titles  # noqa: E402
 
-TRELLIS_BIN = "/home/articulatus/.nvm/versions/node/v22.17.0/bin/trellis"
+from pipeline.trellis import TRELLIS_BIN, _workspace  # noqa: E402
+
 PARENT = "microbiome-research-library"
 ACTOR_ID = "daedalus"
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
@@ -67,9 +69,10 @@ class ImportOutcome:
 
 
 def trellis(*args: str) -> subprocess.CompletedProcess:
+    # Trellis node/edge writes target the configured workspace, not this code repo.
     return subprocess.run(
         [TRELLIS_BIN, *args],
-        cwd=str(PROJECT_ROOT),
+        cwd=_workspace(),
         capture_output=True,
         text=True,
         timeout=30,
