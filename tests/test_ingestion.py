@@ -956,6 +956,42 @@ class TestIngestionUnit:
             ("source-id", "slug-only", "references"),
         ]
 
+    def test_link_citations_passes_edge_index_and_skips_existing_edge(self):
+        source_uuid = "11111111-1111-1111-1111-111111111111"
+        target_uuid = "22222222-2222-2222-2222-222222222222"
+        citations = citation_result(
+            [CitationItem("10.2/existing", None, None, "Target", 2020)]
+        )
+        index = {"by_doi": {"10.2/existing": {"id": target_uuid}}}
+        edge_index = {
+            (
+                source_uuid.replace("-", ""),
+                target_uuid.replace("-", ""),
+                "references",
+            )
+        }
+
+        with patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed",
+            return_value={"id": target_uuid},
+        ), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value=source_uuid
+        ), patch(
+            "pipeline.ingestion.trellis._run_json", side_effect=AssertionError
+        ) as run, patch(
+            "pipeline.ingestion.trellis.link_nodes",
+            wraps=ingestion.trellis.link_nodes,
+        ) as link:
+            result = ingestion.link_citations(
+                "source", citations, index=index, edge_index=edge_index
+            )
+
+        assert result == ingestion.LinkResult(linked=1, skipped=0)
+        link.assert_called_once_with(
+            source_uuid, target_uuid, "references", edge_index=edge_index
+        )
+        run.assert_not_called()
+
     # verify_outcome
     def test_verify_success(self):
         node = {

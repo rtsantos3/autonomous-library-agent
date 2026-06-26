@@ -438,3 +438,57 @@ def test_link_nodes_treats_duplicate_errors_as_idempotent():
             )
         ]
     )
+
+
+def test_link_nodes_idempotent_when_edge_index_contains_key():
+    key = (UUID_SOURCE.replace("-", ""), UUID_TARGET.replace("-", ""), "references")
+    edge_index = {key}
+
+    with patch("pipeline.trellis._run_json", side_effect=AssertionError) as run, patch(
+        "pipeline.trellis._edge_exists", side_effect=AssertionError
+    ):
+        result = trellis.link_nodes(
+            UUID_SOURCE, UUID_TARGET, "references", edge_index=edge_index
+        )
+
+    assert result == {"ok": True, "idempotent": True}
+    run.assert_not_called()
+
+
+def test_link_nodes_idempotent_when_direct_edge_lookup_finds_existing_edge():
+    with patch("pipeline.trellis._edge_exists", return_value=True) as exists, patch(
+        "pipeline.trellis._run_json", side_effect=AssertionError
+    ) as run:
+        result = trellis.link_nodes(UUID_SOURCE, UUID_TARGET, "references")
+
+    assert result == {"ok": True, "idempotent": True}
+    exists.assert_called_once_with(UUID_SOURCE, UUID_TARGET, "references")
+    run.assert_not_called()
+
+
+def test_link_nodes_new_edge_calls_link_and_adds_key_to_edge_index():
+    edge_index = set()
+
+    with patch("pipeline.trellis._run_json", return_value={}) as run, patch(
+        "pipeline.trellis._edge_exists", side_effect=AssertionError
+    ):
+        result = trellis.link_nodes(
+            UUID_SOURCE, UUID_TARGET, "references", edge_index=edge_index
+        )
+
+    assert result == {"ok": True}
+    assert edge_index == {
+        (UUID_SOURCE.replace("-", ""), UUID_TARGET.replace("-", ""), "references")
+    }
+    run.assert_called_once_with(
+        "link",
+        "--source-uuid",
+        UUID_SOURCE,
+        "--target-uuid",
+        UUID_TARGET,
+        "--relationship",
+        "references",
+        "--actor-id",
+        trellis.ACTOR,
+        "--json",
+    )

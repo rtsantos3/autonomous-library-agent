@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import time
 import unicodedata
@@ -377,11 +378,72 @@ def _resolve_to_uuid(slug_or_uuid: str) -> Optional[str]:
         return None
 
 
+def _uuid_hex(uuid: str) -> str:
+    return str(uuid).replace("-", "").lower()
+
+
+def _trellis_db_path() -> Path:
+    return Path(_workspace()) / ".trellis" / "trellis.db"
+
+
+def build_edge_index() -> set[tuple[str, str, str]]:
+    """
+    Read all Trellis edges directly from SQLite.
+
+    Workaround for Trellis#69: create_edge currently has no uniqueness
+    constraint and the CLI has no edge-listing command. Remove this once
+    Trellis enforces edge uniqueness.
+    """
+    path = _trellis_db_path()
+    if not path.exists():
+        return set()
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            rows = conn.execute(
+                "SELECT source_id,target_id,relationship FROM edges"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        logger.warning("build_edge_index failed for %s: %s", path, exc)
+        return set()
+    return {
+        (_uuid_hex(source_id), _uuid_hex(target_id), relationship)
+        for source_id, target_id, relationship in rows
+    }
+
+
+def _edge_exists(src_uuid: str, tgt_uuid: str, relationship: str) -> bool:
+    """
+    Read one edge directly from SQLite.
+
+    Workaround for Trellis#69: create_edge blindly inserts duplicates. Remove
+    this once Trellis enforces edge uniqueness.
+    """
+    path = _trellis_db_path()
+    if not path.exists():
+        return False
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM edges
+                WHERE source_id = ? AND target_id = ? AND relationship = ?
+                LIMIT 1
+                """,
+                (_uuid_hex(src_uuid), _uuid_hex(tgt_uuid), relationship),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning("_edge_exists failed for %s: %s", path, exc)
+        return False
+    return row is not None
+
+
 def link_nodes(
     source: str,
     target: str,
     relation: str = "references",
     actor_id: str = ACTOR,
+    edge_index: set[tuple[str, str, str]] = None,
 ) -> dict:
     """
     Returns {"ok": True} on success or idempotent duplicate.
@@ -399,6 +461,13 @@ def link_nodes(
                 "ok": False,
                 "error": f"Could not resolve UUIDs: src={source} tgt={target}",
             }
+        key = (_uuid_hex(src_uuid), _uuid_hex(tgt_uuid), relation)
+        if edge_index is not None:
+            if key in edge_index:
+                return {"ok": True, "idempotent": True}
+        elif _edge_exists(src_uuid, tgt_uuid, relation):
+            return {"ok": True, "idempotent": True}
+
         _run_json(
             "link",
             "--source-uuid",
@@ -411,6 +480,8 @@ def link_nodes(
             actor_id,
             "--json",
         )
+        if edge_index is not None:
+            edge_index.add(key)
         return {"ok": True}
     except RuntimeError as e:
         msg = str(e)
@@ -522,6 +593,7 @@ def reverse_materialize(
             waiting_uuid and waiting_uuid == new_uuid
         ) or waiting_slug_or_id == new_slug:
             continue
+        # link_nodes does a direct edge-existence read here; see Trellis#69.
         result = link_nodes(waiting_slug_or_id, new_slug, "references")
         if result.get("ok"):
             created += 1

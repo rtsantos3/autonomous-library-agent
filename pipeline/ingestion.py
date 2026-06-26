@@ -878,7 +878,10 @@ def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult
 
 
 def link_citations(
-    slug: str, citations: CitationResult, index: dict = None
+    slug: str,
+    citations: CitationResult,
+    index: dict = None,
+    edge_index: set[tuple[str, str, str]] = None,
 ) -> LinkResult:
     linked = 0
     skipped = 0
@@ -926,7 +929,12 @@ def link_citations(
         ):
             skipped += 1
             continue
-        result = trellis.link_nodes(source_ref, target_slug, "references")
+        if edge_index is None:
+            result = trellis.link_nodes(source_ref, target_slug, "references")
+        else:
+            result = trellis.link_nodes(
+                source_ref, target_slug, "references", edge_index=edge_index
+            )
         if result.get("ok"):
             linked += 1
         else:
@@ -1068,11 +1076,17 @@ def link_stored(
     item: tuple[int, str, CitationResult],
     outcomes: list[IngestionOutcome],
     index: dict,
+    edge_index: set[tuple[str, str, str]] = None,
 ) -> Optional[int]:
     idx, slug, citations = item
     outcome = outcomes[idx]
     try:
-        outcome.link = link_citations(slug, citations, index=index)
+        if edge_index is None:
+            outcome.link = link_citations(slug, citations, index=index)
+        else:
+            outcome.link = link_citations(
+                slug, citations, index=index, edge_index=edge_index
+            )
         return idx
     except Exception as e:
         outcome.errors.append(str(e))
@@ -1320,6 +1334,11 @@ def ingest_batch(
     add_phase("reverse materialize", elapsed, len(upserted))
 
     t0 = time.perf_counter()
+    edge_index = trellis.build_edge_index()
+    elapsed = time.perf_counter() - t0
+    add_phase("edge index build", elapsed, len(edge_index))
+
+    t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         phase2_results = list(
             executor.map(
@@ -1334,7 +1353,15 @@ def ingest_batch(
 
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        list(executor.map(lambda item: link_stored(item, outcomes, index), stored))
+        # Phase3 links distinct source papers' outbound edges. Threads therefore
+        # do not add the same key; set.add for distinct keys is safe under the
+        # GIL, so no lock is needed.
+        list(
+            executor.map(
+                lambda item: link_stored(item, outcomes, index, edge_index),
+                stored,
+            )
+        )
     elapsed = time.perf_counter() - t0
     add_phase("phase3 link", elapsed, len(stored))
 
