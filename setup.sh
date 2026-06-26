@@ -88,6 +88,17 @@ else
   die "trellis CLI not found on PATH. Install the Trellis Node CLI (e.g. via npm/nvm), ensure \`trellis\` is on PATH, then re-run setup.sh."
 fi
 
+# 4b. git-lfs (verify only) ----------------------------------------------------
+#     The graph export (graph/trellis_export.jsonl) is tracked via Git LFS. If
+#     git-lfs was not installed when the workspace was cloned, the working file
+#     is an unresolved pointer; the hydrate step (5) detects that and fetches it.
+say "Verifying Git LFS"
+if command -v git-lfs >/dev/null 2>&1; then
+  ok "git-lfs: $(command -v git-lfs)"
+else
+  warn "git-lfs not found — required only if the graph export is an unresolved LFS pointer"
+fi
+
 # 5. Trellis workspace ---------------------------------------------------------
 #    The workspace is the directory Trellis runs in (it holds .trellis/).
 #    Precedence matches pipeline/trellis.py: TRELLIS_WORKSPACE env wins, then
@@ -101,8 +112,20 @@ GRAPH_EXPORT="$WS/graph/trellis_export.jsonl"
 if [ -d "$WS/.trellis" ]; then
   ok "workspace already initialized (.trellis/ present) — leaving it untouched"
 elif [ -f "$GRAPH_EXPORT" ]; then
-  # Hydrate the local SQLite db from the committed JSONL topology. SQLite is
-  # regenerable; the JSONL export is the shared source of truth.
+  # The export is tracked via Git LFS. If git-lfs was absent at clone time the
+  # working file is an unresolved pointer (first line is the LFS spec URL), and
+  # importing it would silently load nothing — materialize it first so this stays
+  # a single-run bootstrap.
+  if head -n1 "$GRAPH_EXPORT" | grep -q '^version https://git-lfs'; then
+    say "Graph export is an unresolved Git LFS pointer — fetching via git-lfs"
+    command -v git-lfs >/dev/null 2>&1 || die "graph/trellis_export.jsonl is a Git LFS pointer but git-lfs is not installed. Install it (e.g. 'sudo apt-get install git-lfs' or 'brew install git-lfs'), then re-run setup.sh."
+    ( cd "$WS" && git lfs install --local >/dev/null 2>&1 && git lfs pull --include="graph/trellis_export.jsonl" )
+    head -n1 "$GRAPH_EXPORT" | grep -q '^version https://git-lfs' \
+      && die "git lfs pull did not materialize graph/trellis_export.jsonl — check your LFS remote/credentials, then re-run setup.sh."
+    ok "materialized LFS export"
+  fi
+  # Hydrate the local SQLite db from the JSONL topology. SQLite is regenerable;
+  # the JSONL export is the shared source of truth.
   say "Hydrating graph from $GRAPH_EXPORT"
   ( cd "$WS" && { trellis init >/dev/null 2>&1 || true; } && trellis import --path "$GRAPH_EXPORT" )
   ok "imported graph topology into $WS/.trellis"
