@@ -174,6 +174,12 @@ class TestIngestionUnit:
         assert "mesh-major:inflammation" in tags
         assert "mesh-q:metabolism" in tags
 
+    def test_has_pipeline_status_detects_comma_joined_string_tags(self):
+        node = {"tags": "source:manual, pipeline:scaffolded, year:2024"}
+
+        assert ingestion._has_pipeline_status(node, "scaffolded") is True
+        assert ingestion._has_pipeline_status(node, "digested") is False
+
     def test_pubmed_fetch_topical_breadth_axes_feed_tags(self):
         xml = """
         <PubmedArticleSet>

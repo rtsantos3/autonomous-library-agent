@@ -442,6 +442,17 @@ def test_link_nodes_treats_duplicate_errors_as_idempotent():
     )
 
 
+def test_link_nodes_does_not_treat_missing_target_as_idempotent():
+    with patch("pipeline.trellis._edge_exists", return_value=False), patch(
+        "pipeline.trellis._run_json",
+        side_effect=RuntimeError("Error: target node does not exist"),
+    ):
+        result = trellis.link_nodes(UUID_SOURCE, UUID_TARGET, "references")
+
+    assert result == {"ok": False, "error": "Error: target node does not exist"}
+    assert "idempotent" not in result
+
+
 def test_link_nodes_idempotent_when_edge_index_contains_key():
     key = (UUID_SOURCE.replace("-", ""), UUID_TARGET.replace("-", ""), "references")
     edge_index = {key}
@@ -499,7 +510,26 @@ def test_link_nodes_reserves_edge_index_key_before_linking():
 
 
 def test_link_nodes_discards_reserved_key_on_non_runtime_error():
-    edge_index = set()
+    class TrackingSet(set):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.events = []
+
+        def add(self, item):
+            self.events.append(("add", item))
+            super().add(item)
+
+        def discard(self, item):
+            self.events.append(("discard", item))
+            super().discard(item)
+
+    unrelated_key = ("source", "target", "cites")
+    reserved_key = (
+        UUID_SOURCE.replace("-", ""),
+        UUID_TARGET.replace("-", ""),
+        "references",
+    )
+    edge_index = TrackingSet({unrelated_key})
 
     with patch(
         "pipeline.trellis._run_json",
@@ -511,7 +541,8 @@ def test_link_nodes_discards_reserved_key_on_non_runtime_error():
 
     assert result["ok"] is False
     assert "bad json" in result["error"]
-    assert edge_index == set()
+    assert edge_index.events == [("add", reserved_key), ("discard", reserved_key)]
+    assert edge_index == {unrelated_key}
 
 
 def test_link_nodes_treats_non_runtime_duplicate_as_idempotent():
@@ -552,6 +583,47 @@ def test_edge_exists_retries_locked_sqlite_read(tmp_path):
 
     assert connect.call_count == 2
     sleep.assert_called_once_with(0.1)
+
+
+def test_edge_exists_raises_after_exhausting_locked_sqlite_retries(tmp_path):
+    path = tmp_path / "trellis.db"
+    path.touch()
+
+    with patch("pipeline.trellis._trellis_db_path", return_value=path), patch(
+        "pipeline.trellis.sqlite3.connect",
+        side_effect=[
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.OperationalError("database is locked"),
+            sqlite3.OperationalError("database is locked"),
+        ],
+    ) as connect, patch("pipeline.trellis.time.sleep") as sleep:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            trellis._edge_exists(UUID_SOURCE, UUID_TARGET, "references")
+
+    assert connect.call_count == 5
+    assert sleep.call_args_list == [
+        call(0.1),
+        call(0.2),
+        call(0.4),
+        call(0.8),
+    ]
+
+
+def test_edge_exists_non_lock_sqlite_error_raises_without_retry(tmp_path):
+    path = tmp_path / "trellis.db"
+    path.touch()
+
+    with patch("pipeline.trellis._trellis_db_path", return_value=path), patch(
+        "pipeline.trellis.sqlite3.connect",
+        side_effect=sqlite3.OperationalError("no such table: edges"),
+    ) as connect, patch("pipeline.trellis.time.sleep") as sleep:
+        with pytest.raises(sqlite3.OperationalError, match="no such table: edges"):
+            trellis._edge_exists(UUID_SOURCE, UUID_TARGET, "references")
+
+    assert connect.call_count == 1
+    sleep.assert_not_called()
 
 
 def test_build_edge_index_retries_busy_sqlite_read(tmp_path):

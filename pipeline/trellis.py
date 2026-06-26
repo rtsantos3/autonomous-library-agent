@@ -523,7 +523,20 @@ def link_nodes(
                 edge_index.discard(key)
         msg = str(e)
         lower = msg.lower()
-        if "already" in lower or "exist" in lower or "duplicate" in lower:
+        absence = (
+            "not exist" in lower
+            or "does not exist" in lower
+            or "not found" in lower
+            or "no such" in lower
+        )
+        duplicate = (
+            "already exists" in lower
+            or "already exist" in lower
+            or "duplicate" in lower
+        )
+        # Keep this conservative: bare "exist" false-positives on real
+        # absence failures such as "target node does not exist".
+        if duplicate and not absence:
             return {"ok": True, "idempotent": True}
         return {"ok": False, "error": msg}
 
