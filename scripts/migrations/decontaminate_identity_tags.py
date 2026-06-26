@@ -61,12 +61,17 @@ def _dash(uuid_hex: str) -> str:
     return f"{u[:8]}-{u[8:12]}-{u[12:16]}-{u[16:20]}-{u[20:]}"
 
 
-def _own_identity(node_title: str, ref: dict) -> dict:
+def _own_identity(node_title: str, node_uri: str | None, ref: dict) -> dict:
     """The set of identifiers that legitimately belong to THIS node."""
     s2 = ref.get("s2_id")
     pmid = ref.get("pmid")
     dois = set()
-    for v in [ref.get("doi"), ref.get("uri"), *(ref.get("alt_dois") or [])]:
+    for v in [
+        ref.get("doi"),
+        ref.get("uri"),
+        node_uri,
+        *(ref.get("alt_dois") or []),
+    ]:
         k = _doi_key(v or "")
         if k:
             dois.add(k)
@@ -106,7 +111,7 @@ def plan() -> dict:
     # Load every alive node's identity + tags in two sweeps.
     nodes: dict[str, dict] = {}
     for r in cur.execute(
-        "SELECT id, title, metadata_ FROM nodes WHERE status != 'deleted'"
+        "SELECT id, title, uri, metadata_ FROM nodes WHERE status != 'deleted'"
     ):
         ref = {}
         if r["metadata_"]:
@@ -117,7 +122,7 @@ def plan() -> dict:
         nodes[r["id"]] = {
             "id": r["id"],
             "title": r["title"],
-            "ident": _own_identity(r["title"], ref),
+            "ident": _own_identity(r["title"], r["uri"], ref),
             "items": (ref.get("outbound_citations") or {}).get("items") or [],
             "tags": [],
         }
@@ -129,10 +134,21 @@ def plan() -> dict:
             n["tags"].append(r["tag"])
 
     # Contaminated = node carrying an s2id:/pmid: tag that is not its own.
+    #
+    # If metadata gives this node's own s2_id/pmid, ownership is anchored: keep
+    # that tag and strip the rest. If metadata is missing the same-kind anchor
+    # but the node has multiple distinct identity tags, the extras must be
+    # contaminated, yet there is no safe way to choose the true owner. In that
+    # case this dry-run/apply pass only warns and leaves the tags unchanged for
+    # human resolution.
     contaminated: dict[str, dict] = {}
+    ambiguous_identity_tags: list[dict] = []
     for nid, n in nodes.items():
         own = n["ident"]
         foreign = []
+        s2_tags = sorted({t for t in n["tags"] if t.startswith("s2id:")})
+        pmid_tags = sorted({t for t in n["tags"] if t.startswith("pmid:")})
+
         for t in n["tags"]:
             if t.startswith("s2id:") and own["s2"] and t.split(":", 1)[1] != own["s2"]:
                 foreign.append(t)
@@ -145,6 +161,14 @@ def plan() -> dict:
         if foreign:
             kept = [t for t in n["tags"] if t not in foreign]
             contaminated[nid] = {"node": n, "foreign": foreign, "kept_tags": kept}
+
+        ambiguous = []
+        if not own["s2"] and len(s2_tags) > 1:
+            ambiguous.extend(s2_tags)
+        if not own["pmid"] and len(pmid_tags) > 1:
+            ambiguous.extend(pmid_tags)
+        if ambiguous:
+            ambiguous_identity_tags.append({"node": n, "tags": ambiguous})
 
     # For each contaminated target, classify its inbound references edges.
     phantom_edges: list[tuple] = []  # (source_id, target_id)
@@ -168,6 +192,7 @@ def plan() -> dict:
         "phantom_edges": phantom_edges,
         "kept_edges": kept_edges,
         "total_nodes": len(nodes),
+        "ambiguous_identity_tags": ambiguous_identity_tags,
     }
 
 
@@ -192,6 +217,7 @@ def run(apply: bool) -> int:
     p = plan()
     contaminated = p["contaminated"]
     phantom = p["phantom_edges"]
+    ambiguous = p["ambiguous_identity_tags"]
 
     per_target = defaultdict(int)
     for _, tgt in phantom:
@@ -205,6 +231,14 @@ def run(apply: bool) -> int:
             f"{'APPLY' if apply else 'DRY '} {title!r}: "
             f"-{len(c['foreign'])} foreign id-tag(s) {c['foreign']}, "
             f"-{per_target[nid]} phantom inbound edge(s)"
+        )
+
+    for a in sorted(ambiguous, key=lambda item: item["node"]["id"]):
+        title = (a["node"]["title"] or "")[:60]
+        print(
+            f"WARNING ambiguous identity tags on node {_dash(a['node']['id'])} "
+            f"{title!r}: {a['tags']} (metadata lacks same-kind owner id; "
+            "leaving unchanged)"
         )
 
     if apply:
