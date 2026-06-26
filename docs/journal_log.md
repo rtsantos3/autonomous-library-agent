@@ -191,7 +191,7 @@ autonomous_library_agent/
     <slug>.ris              # EndNote-compatible exports
   docs/
     journal_log.md
-  AGENTS.md                 # Agent orientation / system prompt
+  AGENT-CONTRACT.md                 # Agent orientation / system prompt
   04-implementation-plan.md
   config.yaml
   .env                      # API keys (not committed)

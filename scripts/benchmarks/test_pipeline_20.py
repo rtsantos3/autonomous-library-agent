@@ -2,17 +2,16 @@
 Integration test: run full ingestion pipeline on 20 queued nodes,
 then report interconnections materialized.
 """
-import json
+
 import sys
-import subprocess
 from datetime import date
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pipeline.trellis import find_nodes, get_node
 from pipeline.ingestion import ingest_reference_pipeline
@@ -67,34 +66,38 @@ def run():
             continue
 
         created = outcome.upsert.created if outcome.upsert else None
-        stored  = outcome.citation_store.stored if outcome.citation_store else 0
-        linked  = outcome.link.linked if outcome.link else 0
+        stored = outcome.citation_store.stored if outcome.citation_store else 0
+        linked = outcome.link.linked if outcome.link else 0
         skipped = outcome.link.skipped if outcome.link else 0
-        status  = outcome.verify.pipeline_status if outcome.verify else "?"
-        src     = outcome.resolve.source if outcome.resolve else "?"
+        status = outcome.verify.pipeline_status if outcome.verify else "?"
+        src = outcome.resolve.source if outcome.resolve else "?"
 
         total_linked += linked
         total_stored += stored
 
         print(f"  slug:    {outcome.upsert.slug if outcome.upsert else 'none'}")
         print(f"  created: {created}  source: {src}  status: {status}")
-        print(f"  citations stored: {stored}  edges linked: {linked}  skipped: {skipped}")
+        print(
+            f"  citations stored: {stored}  edges linked: {linked}  skipped: {skipped}"
+        )
 
-        results.append({
-            "doi": doi,
-            "slug": outcome.upsert.slug if outcome.upsert else None,
-            "created": created,
-            "source": src,
-            "stored": stored,
-            "linked": linked,
-            "skipped": skipped,
-            "status": status,
-        })
+        results.append(
+            {
+                "doi": doi,
+                "slug": outcome.upsert.slug if outcome.upsert else None,
+                "created": created,
+                "source": src,
+                "stored": stored,
+                "linked": linked,
+                "skipped": skipped,
+                "status": status,
+            }
+        )
 
     queued_after = count_queued()
 
     print(f"\n{'='*60}")
-    print(f"SUMMARY")
+    print("SUMMARY")
     print(f"{'='*60}")
     print(f"  Processed:        {len(results)}/{len(DOIS)}")
     print(f"  Failed:           {len(failed)}")
@@ -103,9 +106,11 @@ def run():
     print(f"  Citations stored: {total_stored}")
     print(f"  Edges linked:     {total_linked}")
     print(f"  Queued before:    {queued_before}")
-    print(f"  Queued after:     {queued_after}  (delta: {queued_after - queued_before}, should be 0 — no stubs)")
+    print(
+        f"  Queued after:     {queued_after}  (delta: {queued_after - queued_before}, should be 0 — no stubs)"
+    )
     if failed:
-        print(f"\n  Failed DOIs:")
+        print("\n  Failed DOIs:")
         for d in failed:
             print(f"    {d}")
 
@@ -113,6 +118,7 @@ def run():
     slugs = {r["slug"] for r in results if r["slug"]}
     print(f"\n  Checking cross-links among the {len(slugs)} processed nodes...")
     cross = 0
+    cross_failures = 0
     for r in results:
         if not r["slug"]:
             continue
@@ -124,12 +130,20 @@ def run():
                 item_doi = item.get("doi") or ""
                 if any(item_doi == rd for rd in DOIS if rd != r["doi"]):
                     cross += 1
-                    print(f"    {r['slug']} → cites a peer in our batch (doi: {item_doi})")
-        except Exception:
-            pass
+                    print(
+                        f"    {r['slug']} → cites a peer in our batch (doi: {item_doi})"
+                    )
+        except Exception as exc:
+            cross_failures += 1
+            print(
+                f"    ERROR checking cross-links for {r['slug']} ({r['doi']}): {exc!r}"
+            )
 
     print(f"\n  Cross-citations within batch: {cross}")
-    print(f"  No-stub check: queued delta = {queued_after - queued_before} (expected 0)")
+    print(f"  Cross-link check failures: {cross_failures}")
+    print(
+        f"  No-stub check: queued delta = {queued_after - queued_before} (expected 0)"
+    )
     print(f"\n{'='*60}")
     print("DONE")
 

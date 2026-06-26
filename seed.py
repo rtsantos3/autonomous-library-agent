@@ -10,7 +10,6 @@ import argparse
 import json
 import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -90,18 +89,26 @@ def trellis_find_uri(doi):
     uri = f"https://doi.org/{doi}"
     result = subprocess.run(
         [TRELLIS_BIN, "find", "--text", uri, "--json"],
-        cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
         return False
     parsed = json.loads(result.stdout)
-    nodes = parsed if isinstance(parsed, list) else parsed.get("results", parsed.get("nodes", []))
+    nodes = (
+        parsed
+        if isinstance(parsed, list)
+        else parsed.get("results", parsed.get("nodes", []))
+    )
     return any(n.get("uri") == uri for n in nodes)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Seed Trellis from EndNote library")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without writing"
+    )
     args = parser.parse_args()
 
     papers = get_papers()
@@ -131,7 +138,9 @@ def main():
         if p["doi"] and trellis_find_uri(p["doi"]):
             skipped += 1
             if (i + 1) % 100 == 0:
-                print(f"  [{i+1}/{len(papers)}] added={added} skipped={skipped} failed={failed}")
+                print(
+                    f"  [{i+1}/{len(papers)}] added={added} skipped={skipped} failed={failed}"
+                )
             continue
 
         slug, err = trellis_add(
@@ -150,7 +159,9 @@ def main():
                 print(f"  FAIL: {title[:50]} — {err[:100]}")
 
         if (i + 1) % 100 == 0:
-            print(f"  [{i+1}/{len(papers)}] added={added} skipped={skipped} failed={failed}")
+            print(
+                f"  [{i+1}/{len(papers)}] added={added} skipped={skipped} failed={failed}"
+            )
 
     print(f"\nDone. added={added} skipped={skipped} failed={failed}")
 

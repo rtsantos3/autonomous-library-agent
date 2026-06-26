@@ -3,11 +3,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 
-def log_benchmark_result(label: str, n_papers: int, summary: dict, metrics, report_text: str) -> dict:
+def log_benchmark_result(
+    label: str, n_papers: int, summary: dict, metrics, report_text: str
+) -> dict:
     """Append one structured record to results/benchmark_metrics.jsonl and
     save the full human-readable report to results/{label}_{timestamp}.txt.
     Returns paths written. JSONL is opened in append mode so historical

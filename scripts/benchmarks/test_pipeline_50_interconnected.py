@@ -3,17 +3,18 @@ Integration test: 50 foundational interconnected microbiome papers (2005-2013).
 Uses ingest_batch() for parallelized processing.
 Reports cross-links materialized.
 """
-import json
+
 import sys
 import time
 from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(Path(__file__).resolve().parents[3] / ".env")
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pipeline.trellis import find_nodes, get_node
 from pipeline.ingestion import format_metrics_table, ingest_batch
@@ -95,7 +96,7 @@ def run():
     queued_after = len(find_nodes(tag="pipeline:queued"))
 
     print(f"\n{'='*60}")
-    print(f"SUMMARY")
+    print("SUMMARY")
     print(f"{'='*60}")
     print(f"  Time elapsed:     {elapsed:.1f}s ({elapsed/len(DOIS):.1f}s per paper)")
     print(f"  Processed:        {len(ok)}/{len(DOIS)}")
@@ -108,7 +109,7 @@ def run():
     print(f"  Queued delta:     {queued_after - queued_before} (expect 0 — no stubs)")
 
     if failed:
-        print(f"\n  Failures:")
+        print("\n  Failures:")
         for o in failed:
             doi = o.parse.doi if o.parse else "?"
             print(f"    {doi}: {o.errors}")
@@ -117,6 +118,7 @@ def run():
     slugs = {o.upsert.slug for o in ok if o.upsert and o.upsert.slug}
     print(f"\n  Checking cross-links among {len(slugs)} processed nodes...")
     cross_edges = []
+    cross_failures = 0
     for o in ok:
         if not o.upsert or not o.upsert.slug:
             continue
@@ -126,12 +128,21 @@ def run():
             items = (meta.get("outbound_citations") or {}).get("items") or []
             for item in items:
                 item_doi = (item.get("doi") or "").lower()
-                if any(item_doi == d.lower() for d in DOIS if d.lower() != (o.parse.doi or "").lower()):
+                if any(
+                    item_doi == d.lower()
+                    for d in DOIS
+                    if d.lower() != (o.parse.doi or "").lower()
+                ):
                     cross_edges.append((o.upsert.slug, item_doi))
-        except Exception:
-            pass
+        except Exception as exc:
+            cross_failures += 1
+            doi = o.parse.doi if o.parse else "?"
+            print(
+                f"    ERROR checking cross-links for {o.upsert.slug} ({doi}): {exc!r}"
+            )
 
     print(f"  Cross-citations within batch (in metadata): {len(cross_edges)}")
+    print(f"  Cross-link check failures: {cross_failures}")
     if cross_edges:
         for src, tgt in cross_edges[:10]:
             print(f"    {src[:50]} → {tgt}")

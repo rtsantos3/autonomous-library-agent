@@ -1,12 +1,26 @@
 # Secrets
 .env
 
+# Local tuneable settings (machine-specific workspace path). Tracked template is
+# config.yml.example; setup.sh creates config.yml from it. Anchored so it never
+# matches .trellis/config.yml (Trellis workspace metadata, which stays tracked).
+/config.yml
+
 # Local library data — never committed
 data/
 vault/
 
 # Conda environment
 setup/
+
+# Trellis workspace. The SQLite db (trellis.db + WAL/SHM) is regenerable local
+# runtime state and is NEVER committed. The durable, shareable artifact is the
+# JSONL export at graph/trellis_export.jsonl — produced by scripts/export_graph.sh
+# and rebuilt on clone via `trellis import` (see setup.sh). config.yml / README.md
+# inside .trellis/ stay tracked as small workspace metadata.
+.trellis/trellis.db
+.trellis/trellis.db-wal
+.trellis/trellis.db-shm
 
 # Python
 __pycache__/

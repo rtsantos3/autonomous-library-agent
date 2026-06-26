@@ -12,16 +12,28 @@ Usage:
 Returns the Trellis slug on success, None on failure.
 Idempotent: if DOI already exists, returns existing slug without re-adding.
 """
-import json, shlex, subprocess, re, unicodedata
+
+import json
+import re
+import subprocess
+import sys
+import unicodedata
+from pathlib import Path
 from typing import Optional
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from pipeline.trellis import TRELLIS_BIN, _workspace  # noqa: E402
+
 PIPELINE_TAGS = [
-    'pipeline:queued',
-    'pipeline:scaffolded',
-    'pipeline:digested',
-    'pipeline:partial',
-    'pipeline:needs-review',
-    'pipeline:failed',
+    "pipeline:queued",
+    "pipeline:scaffolded",
+    "pipeline:digested",
+    "pipeline:partial",
+    "pipeline:needs-review",
+    "pipeline:failed",
 ]
 
 
@@ -29,12 +41,13 @@ PIPELINE_TAGS = [
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _clean(t: str) -> str:
     if not t:
         return ""
-    t = re.sub(r'[\r\n]+', ' ', t)
-    t = ' '.join(t.split())
-    t = t.replace('"', "'").replace('\\', '')
+    t = re.sub(r"[\r\n]+", " ", t)
+    t = " ".join(t.split())
+    t = t.replace('"', "'").replace("\\", "")
     return t[:2000]
 
 
@@ -42,20 +55,23 @@ def _norm_title(t: str) -> str:
     """Normalize title for comparison: lowercase, strip unicode/punct, collapse whitespace."""
     if not t:
         return ""
-    t = unicodedata.normalize('NFKD', t.lower().strip())
-    t = t.encode('ascii', 'ignore').decode('ascii')
-    t = t.rstrip('.')
+    t = unicodedata.normalize("NFKD", t.lower().strip())
+    t = t.encode("ascii", "ignore").decode("ascii")
+    t = t.rstrip(".")
     # collapse whitespace
-    t = ' '.join(t.split())
+    t = " ".join(t.split())
     return t
 
 
 def _trellis(*args: str, json_output: bool = True) -> subprocess.CompletedProcess:
     """Run a trellis CLI command."""
-    cmd = ['trellis'] + list(args)
-    if json_output and '--json' not in cmd:
-        cmd.append('--json')
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    cmd = [TRELLIS_BIN] + list(args)
+    if json_output and "--json" not in cmd:
+        cmd.append("--json")
+    # Trellis calls target the resolved workspace, not the ambient cwd.
+    return subprocess.run(
+        cmd, cwd=_workspace(), capture_output=True, text=True, timeout=15
+    )
 
 
 def _doi_exists(doi: str) -> Optional[str]:
@@ -64,7 +80,7 @@ def _doi_exists(doi: str) -> Optional[str]:
     trellis grep <doi> searches all fields (uri, metadata, tags).
     Avoid calling this in bulk loops — use load_existing_dois() instead.
     """
-    r = _trellis('grep', doi)
+    r = _trellis("grep", doi)
     if r.returncode != 0 or not r.stdout.strip():
         return None
     try:
@@ -72,7 +88,7 @@ def _doi_exists(doi: str) -> Optional[str]:
     except (json.JSONDecodeError, ValueError):
         return None
     if nodes:
-        return nodes[0].get('slug')
+        return nodes[0].get("slug")
     return None
 
 
@@ -83,27 +99,33 @@ def load_existing_dois() -> dict:
     """
     dois = {}
     for tag in PIPELINE_TAGS:
-        r = _trellis('find', '--tag', tag)
+        r = _trellis("find", "--tag", tag)
         try:
             nodes = json.loads(r.stdout) if r.stdout.strip() else []
         except (json.JSONDecodeError, ValueError):
             nodes = []
         for n in nodes:
-            slug = n.get('slug', '')
-            uri = n.get('uri', '') or ''
-            meta = n.get('metadata', {}) if isinstance(n.get('metadata', {}), dict) else {}
-            ref = meta.get('reference', {}) if isinstance(meta, dict) else {}
+            slug = n.get("slug", "")
+            uri = n.get("uri", "") or ""
+            meta = (
+                n.get("metadata", {}) if isinstance(n.get("metadata", {}), dict) else {}
+            )
+            ref = meta.get("reference", {}) if isinstance(meta, dict) else {}
             # Handle both "doi:10.x/yy" and "https://doi.org/10.x/yy"
-            if uri.startswith('doi:'):
+            if uri.startswith("doi:"):
                 doi = uri[4:].strip()
                 dois[doi.lower()] = slug
-            elif 'doi.org/' in uri:
-                doi = uri.split('doi.org/')[-1].strip()
+            elif "doi.org/" in uri:
+                doi = uri.split("doi.org/")[-1].strip()
                 dois[doi.lower()] = slug
-            elif isinstance(ref, dict) and ref.get('doi'):
-                dois[str(ref['doi']).strip().lower()] = slug
-            elif isinstance(ref, dict) and ref.get('url') and 'doi.org/' in str(ref['url']):
-                doi = str(ref['url']).split('doi.org/')[-1].strip()
+            elif isinstance(ref, dict) and ref.get("doi"):
+                dois[str(ref["doi"]).strip().lower()] = slug
+            elif (
+                isinstance(ref, dict)
+                and ref.get("url")
+                and "doi.org/" in str(ref["url"])
+            ):
+                doi = str(ref["url"]).split("doi.org/")[-1].strip()
                 dois[doi.lower()] = slug
     return dois
 
@@ -116,7 +138,7 @@ def _title_exists(title: str, _cache: dict = None) -> Optional[str]:
     nt = _norm_title(title)
     if not nt or len(nt) < 10:
         return None
-    r = _trellis('find', '--text', nt)
+    r = _trellis("find", "--text", nt)
     if r.returncode != 0 or not r.stdout.strip():
         return None
     try:
@@ -124,9 +146,9 @@ def _title_exists(title: str, _cache: dict = None) -> Optional[str]:
     except (json.JSONDecodeError, ValueError):
         return None
     for n in nodes:
-        existing_nt = _norm_title(n.get('title', ''))
+        existing_nt = _norm_title(n.get("title", ""))
         if existing_nt == nt:
-            return n.get('slug')
+            return n.get("slug")
     return None
 
 
@@ -137,26 +159,31 @@ def load_existing_titles() -> dict:
     """
     titles = {}
     for tag in PIPELINE_TAGS:
-        r = _trellis('find', '--tag', tag)
+        r = _trellis("find", "--tag", tag)
         try:
             nodes = json.loads(r.stdout) if r.stdout.strip() else []
         except (json.JSONDecodeError, ValueError):
             nodes = []
         for n in nodes:
-            nt = _norm_title(n.get('title', ''))
+            nt = _norm_title(n.get("title", ""))
             if not nt:
-                meta = n.get('metadata', {}) if isinstance(n.get('metadata', {}), dict) else {}
-                ref = meta.get('reference', {}) if isinstance(meta, dict) else {}
+                meta = (
+                    n.get("metadata", {})
+                    if isinstance(n.get("metadata", {}), dict)
+                    else {}
+                )
+                ref = meta.get("reference", {}) if isinstance(meta, dict) else {}
                 if isinstance(ref, dict):
-                    nt = _norm_title(ref.get('title', ''))
+                    nt = _norm_title(ref.get("title", ""))
             if nt:
-                titles[nt] = n.get('slug')
+                titles[nt] = n.get("slug")
     return titles
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def ingest_paper(
     doi: str,
@@ -190,7 +217,7 @@ def ingest_paper(
     (Metadata enrichment from external APIs happens in the scaffold stage.)
     """
     doi = doi.strip()
-    if not doi.startswith('10.'):
+    if not doi.startswith("10."):
         return None
 
     # --- Dedup gate ---
@@ -214,29 +241,29 @@ def ingest_paper(
 
     # --- Build metadata ---
     meta = {
-        'reference': {
-            'schema': 'reference-v1',
-            'title': _clean(title) if title else f"DOI:{doi}",
+        "reference": {
+            "schema": "reference-v1",
+            "title": _clean(title) if title else f"DOI:{doi}",
         }
     }
     if doi:
-        meta['reference']['doi'] = doi
+        meta["reference"]["doi"] = doi
     if year:
-        meta['reference']['year'] = year
+        meta["reference"]["year"] = year
     if venue:
-        meta['reference']['venue'] = _clean(venue)
+        meta["reference"]["venue"] = _clean(venue)
     if authors:
-        meta['reference']['authors'] = _clean(authors)
+        meta["reference"]["authors"] = _clean(authors)
     meta_json = json.dumps(meta, ensure_ascii=False)
 
     # --- Build tags ---
     tags = [
-        'pipeline:scaffolded',
-        f'source:{source}',
-        f'depth:{depth}',
+        "pipeline:scaffolded",
+        f"source:{source}",
+        f"depth:{depth}",
     ]
     if year and year.isdigit():
-        tags.append(f'year:{year}')
+        tags.append(f"year:{year}")
     if extra_tags:
         tags.extend(extra_tags)
 
@@ -245,28 +272,39 @@ def ingest_paper(
 
     # --- Build command ---
     cmd = [
-        'trellis', 'add', 'reference',
+        TRELLIS_BIN,
+        "add",
+        "reference",
         paper_title,
     ]
     if abstract:
-        cmd.extend(['--abstract', _clean(abstract)])
-    cmd.extend([
-        '--metadata', meta_json,
-        '--tags', ','.join(tags),
-        '--parent', parent,
-        '--actor-id', actor,
-        '--json',
-    ])
+        cmd.extend(["--abstract", _clean(abstract)])
+    cmd.extend(
+        [
+            "--metadata",
+            meta_json,
+            "--tags",
+            ",".join(tags),
+            "--parent",
+            parent,
+            "--actor-id",
+            actor,
+            "--json",
+        ]
+    )
 
     # --- Execute ---
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    # Trellis calls target the resolved workspace, not the ambient cwd.
+    r = subprocess.run(
+        cmd, cwd=_workspace(), capture_output=True, text=True, timeout=15
+    )
 
     if r.returncode == 0:
         try:
             data = json.loads(r.stdout)
             # trellis add returns {"ok": true, "node": {...}}
-            node = data.get('node', data)
-            return node.get('slug')
+            node = data.get("node", data)
+            return node.get("slug")
         except (json.JSONDecodeError, ValueError):
             return _doi_exists(doi)
 
@@ -278,17 +316,18 @@ def ingest_paper(
 # CLI entry point (for testing / one-off use)
 # ---------------------------------------------------------------------------
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description='Ingest a single paper into Trellis')
-    p.add_argument('--doi', required=True, help='DOI (required)')
-    p.add_argument('--title', default=None)
-    p.add_argument('--abstract', default=None)
-    p.add_argument('--year', default=None)
-    p.add_argument('--venue', default=None)
-    p.add_argument('--authors', default=None)
-    p.add_argument('--source', default='manual')
-    p.add_argument('--depth', type=int, default=0)
+
+    p = argparse.ArgumentParser(description="Ingest a single paper into Trellis")
+    p.add_argument("--doi", required=True, help="DOI (required)")
+    p.add_argument("--title", default=None)
+    p.add_argument("--abstract", default=None)
+    p.add_argument("--year", default=None)
+    p.add_argument("--venue", default=None)
+    p.add_argument("--authors", default=None)
+    p.add_argument("--source", default="manual")
+    p.add_argument("--depth", type=int, default=0)
     args = p.parse_args()
 
     slug = ingest_paper(

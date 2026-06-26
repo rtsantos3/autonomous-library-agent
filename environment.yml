@@ -1,0 +1,19 @@
+# Conda environment for the autonomous-library-agent (Daedalus) ingestion pipeline.
+#
+# Created by setup.sh as a self-contained prefix env in ./setup (gitignored):
+#   conda env create -p ./setup -f environment.yml
+#   conda activate ./setup
+#
+# Runtime deps are deliberately minimal — everything else the pipeline uses is
+# in the Python standard library. Static-analysis tooling lives in the separate
+# `code_tester_toolbox` env and is intentionally not included here.
+name: autonomous-library-agent
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - requests
+  - python-dotenv
+  - pyyaml
+  - pytest

@@ -7,7 +7,7 @@ An autonomous microbiome research agent that ingests, digests, and queries acade
 ## Current State
 
 ### Done
-- `AGENTS.md` — full agent orientation / system prompt with 4 operating modes (autonomous loop, interactive query, research command, review notifier)
+- `AGENT-CONTRACT.md` — full agent orientation / system prompt with 4 operating modes (autonomous loop, interactive query, research command, review notifier)
 - `SYSTEM_PROMPT.md` — short bootstrap prompt to pass to Hermes
 - `prompts/extract.md` — LLM extraction template (findings, hypotheses, methods, concepts, datasets, gaps → strict JSON)
 - `prompts/verify.md` — LLM verification template (three-way: confirmed/uncertain/rejected)
@@ -17,7 +17,7 @@ An autonomous microbiome research agent that ingests, digests, and queries acade
 - `seed.py` — seeds EndNote library into Trellis
 - `.env` — NCBI API key configured
 - `docs/journal_log.md` — full architecture documentation
-- `04-implementation-plan.md` — original plan (partially outdated, superseded by AGENTS.md)
+- `04-implementation-plan.md` — original plan (partially outdated, superseded by AGENT-CONTRACT.md)
 - Trellis project node `microbiome-research-library` created
 - 10 test papers seeded and scaffolded by the agent, 46 citation-expanded papers queued
 - Paper Search MCP installed in Hermes
@@ -29,7 +29,7 @@ An autonomous microbiome research agent that ingests, digests, and queries acade
   2. Use REST API via `curl` with `trellis serve` running
   3. Direct SQLite writes (not recommended)
 - **Existing 53 nodes are type `reference`** (converted from `custom` via direct SQLite update). BUT `reference` is NOT in the Trellis `NodeType` enum (`core/enums.py`). It works via the CLI's `coerce_unknown_type_to_custom` validator. Need to either add `reference` to the enum or use `custom` type.
-- **Duplicate nodes exist**: "Bilophila wadsworthia isolates from clinical specimens" (exact dupe), "E. coli" vs "Escherichia coli" (near dupe). Dedup rules updated in AGENTS.md but existing dupes need cleanup.
+- **Duplicate nodes exist**: "Bilophila wadsworthia isolates from clinical specimens" (exact dupe), "E. coli" vs "Escherichia coli" (near dupe). Dedup rules updated in AGENT-CONTRACT.md but existing dupes need cleanup.
 - **Nougat** not yet installed in the conda env (needed as OCR fallback for scanned PDFs)
 
 ### Not Started
@@ -71,7 +71,7 @@ An autonomous microbiome research agent that ingests, digests, and queries acade
 
 ```
 autonomous_library_agent/
-  AGENTS.md              # Master agent instructions
+  AGENT-CONTRACT.md              # Master agent instructions
   SYSTEM_PROMPT.md       # Bootstrap prompt for Hermes
   04-implementation-plan.md
   seed.py                # Seeds EndNote → Trellis
