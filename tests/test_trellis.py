@@ -1,6 +1,8 @@
 import json
+import sqlite3
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -455,6 +457,47 @@ def test_link_nodes_idempotent_when_edge_index_contains_key():
     run.assert_not_called()
 
 
+def test_link_nodes_reserves_edge_index_key_before_linking():
+    edge_index = set()
+    edge_lock = threading.Lock()
+
+    with patch("pipeline.trellis._run_json", return_value={}) as run, patch(
+        "pipeline.trellis._edge_exists", side_effect=AssertionError
+    ):
+        first = trellis.link_nodes(
+            UUID_SOURCE,
+            UUID_TARGET,
+            "references",
+            edge_index=edge_index,
+            edge_lock=edge_lock,
+        )
+        second = trellis.link_nodes(
+            UUID_SOURCE,
+            UUID_TARGET,
+            "references",
+            edge_index=edge_index,
+            edge_lock=edge_lock,
+        )
+
+    assert first == {"ok": True}
+    assert second == {"ok": True, "idempotent": True}
+    assert edge_index == {
+        (UUID_SOURCE.replace("-", ""), UUID_TARGET.replace("-", ""), "references")
+    }
+    run.assert_called_once_with(
+        "link",
+        "--source-uuid",
+        UUID_SOURCE,
+        "--target-uuid",
+        UUID_TARGET,
+        "--relationship",
+        "references",
+        "--actor-id",
+        trellis.ACTOR,
+        "--json",
+    )
+
+
 def test_link_nodes_idempotent_when_direct_edge_lookup_finds_existing_edge():
     with patch("pipeline.trellis._edge_exists", return_value=True) as exists, patch(
         "pipeline.trellis._run_json", side_effect=AssertionError
@@ -462,6 +505,21 @@ def test_link_nodes_idempotent_when_direct_edge_lookup_finds_existing_edge():
         result = trellis.link_nodes(UUID_SOURCE, UUID_TARGET, "references")
 
     assert result == {"ok": True, "idempotent": True}
+    exists.assert_called_once_with(UUID_SOURCE, UUID_TARGET, "references")
+    run.assert_not_called()
+
+
+def test_link_nodes_fails_closed_when_direct_edge_lookup_fails():
+    with patch(
+        "pipeline.trellis._edge_exists",
+        side_effect=sqlite3.OperationalError("database is locked"),
+    ) as exists, patch("pipeline.trellis._run_json", side_effect=AssertionError) as run:
+        result = trellis.link_nodes(UUID_SOURCE, UUID_TARGET, "references")
+
+    assert result == {
+        "ok": False,
+        "error": "edge existence check failed: database is locked",
+    }
     exists.assert_called_once_with(UUID_SOURCE, UUID_TARGET, "references")
     run.assert_not_called()
 

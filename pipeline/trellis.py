@@ -7,6 +7,7 @@ this module is pure data transport between the pipeline and the graph store.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -404,7 +405,7 @@ def build_edge_index() -> set[tuple[str, str, str]]:
             ).fetchall()
     except sqlite3.Error as exc:
         logger.warning("build_edge_index failed for %s: %s", path, exc)
-        return set()
+        raise
     return {
         (_uuid_hex(source_id), _uuid_hex(target_id), relationship)
         for source_id, target_id, relationship in rows
@@ -434,7 +435,7 @@ def _edge_exists(src_uuid: str, tgt_uuid: str, relationship: str) -> bool:
             ).fetchone()
     except sqlite3.Error as exc:
         logger.warning("_edge_exists failed for %s: %s", path, exc)
-        return False
+        raise
     return row is not None
 
 
@@ -444,6 +445,7 @@ def link_nodes(
     relation: str = "references",
     actor_id: str = ACTOR,
     edge_index: set[tuple[str, str, str]] = None,
+    edge_lock=None,
 ) -> dict:
     """
     Returns {"ok": True} on success or idempotent duplicate.
@@ -453,6 +455,8 @@ def link_nodes(
     Always uses --source-uuid / --target-uuid / --relationship to avoid
     slug ambiguity errors. Resolves slugs to UUIDs when necessary.
     """
+    reserved = False
+    key = None
     try:
         src_uuid = source if _is_uuid(source) else _resolve_to_uuid(source)
         tgt_uuid = target if _is_uuid(target) else _resolve_to_uuid(target)
@@ -463,10 +467,26 @@ def link_nodes(
             }
         key = (_uuid_hex(src_uuid), _uuid_hex(tgt_uuid), relation)
         if edge_index is not None:
-            if key in edge_index:
-                return {"ok": True, "idempotent": True}
-        elif _edge_exists(src_uuid, tgt_uuid, relation):
-            return {"ok": True, "idempotent": True}
+            lock_context = (
+                edge_lock if edge_lock is not None else contextlib.nullcontext()
+            )
+            with lock_context:
+                if key in edge_index:
+                    return {"ok": True, "idempotent": True}
+                # Reserve before the subprocess to avoid duplicate edges when
+                # persistent-agent batches include duplicate/deduped sources.
+                # Trellis#69: the CLI currently has no edge uniqueness guard.
+                edge_index.add(key)
+                reserved = True
+        else:
+            try:
+                if _edge_exists(src_uuid, tgt_uuid, relation):
+                    return {"ok": True, "idempotent": True}
+            except sqlite3.Error as e:
+                return {
+                    "ok": False,
+                    "error": f"edge existence check failed: {e}",
+                }
 
         _run_json(
             "link",
@@ -480,10 +500,14 @@ def link_nodes(
             actor_id,
             "--json",
         )
-        if edge_index is not None:
-            edge_index.add(key)
         return {"ok": True}
     except RuntimeError as e:
+        if reserved and edge_index is not None and key is not None:
+            lock_context = (
+                edge_lock if edge_lock is not None else contextlib.nullcontext()
+            )
+            with lock_context:
+                edge_index.discard(key)
         msg = str(e)
         lower = msg.lower()
         if "already" in lower or "exist" in lower or "duplicate" in lower:

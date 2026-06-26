@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
@@ -988,7 +989,11 @@ class TestIngestionUnit:
 
         assert result == ingestion.LinkResult(linked=1, skipped=0)
         link.assert_called_once_with(
-            source_uuid, target_uuid, "references", edge_index=edge_index
+            source_uuid,
+            target_uuid,
+            "references",
+            edge_index=edge_index,
+            edge_lock=None,
         )
         run.assert_not_called()
 
@@ -1406,6 +1411,71 @@ class TestIngestionUnit:
             call("source", "digesting"),
             call("source", "digested"),
         ]
+
+    def test_ingest_batch_falls_back_when_edge_index_build_fails(self):
+        citations = citation_result(
+            [CitationItem("10.2/y", None, None, "Target", 2020)]
+        )
+        with patch("pipeline.aggregator.batch_resolve", return_value={}), patch(
+            "pipeline.ingestion.resolve_identity", return_value=resolved()
+        ), patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=None
+        ), patch(
+            "pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ), patch(
+            "pipeline.ingestion.trellis.build_node_index", return_value={}
+        ) as node_index, patch(
+            "pipeline.ingestion.trellis.reverse_materialize"
+        ), patch(
+            "pipeline.ingestion.fetch_outbound_citations", return_value=citations
+        ), patch(
+            "pipeline.ingestion.store_citations",
+            return_value=ingestion.CitationStoreResult(1),
+        ), patch(
+            "pipeline.ingestion.trellis.build_edge_index",
+            side_effect=sqlite3.OperationalError("cannot read edges"),
+        ), patch(
+            "pipeline.ingestion.link_citations",
+            return_value=ingestion.LinkResult(1, 0),
+        ) as link, patch(
+            "pipeline.ingestion.verify_outcome",
+            return_value=ingestion.VerifyResult(True, True, "digesting", 1),
+        ):
+            outcomes, _metrics = ingestion.ingest_batch(["10.1/x"], workers=1)
+
+        assert outcomes[0].errors == []
+        assert node_index.call_count == 2
+        link.assert_called_once_with("source", citations, index={})
+
+    def test_resolve_and_upsert_records_digesting_mark_failure(self):
+        outcome = ingestion.IngestionOutcome()
+        resolve_timings = []
+        upsert_timings = []
+
+        with patch(
+            "pipeline.ingestion.resolve_identity", return_value=resolved()
+        ), patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=None
+        ), patch(
+            "pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status",
+            side_effect=RuntimeError("status write failed"),
+        ):
+            result = ingestion.resolve_and_upsert(
+                (0, "10.1/x"),
+                [outcome],
+                lambda _doi: None,
+                resolve_timings,
+                upsert_timings,
+                ingestion.threading.Lock(),
+                {},
+            )
+
+        assert result == (0, "10.1/x", "source")
+        assert outcome.errors == ["failed to mark digesting: status write failed"]
 
     def test_resolve_and_upsert_failure_does_not_mark_digesting(self):
         outcome = ingestion.IngestionOutcome()

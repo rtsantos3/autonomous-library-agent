@@ -75,7 +75,9 @@ class TestBatchWorkers:
             return_value=DedupResult(None, None),
         ) as dedup, patch(
             "pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)
-        ) as upsert:
+        ) as upsert, patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ):
             result = ingestion.resolve_and_upsert(
                 (0, "10.1/x"),
                 outcomes,
