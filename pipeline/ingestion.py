@@ -903,6 +903,13 @@ def link_citations(
         if not target_slug:
             skipped += 1
             continue
+        # Never link a paper to itself. A reference item with no stable identifier
+        # falls through to title matching and can resolve back to the source node
+        # (e.g. an S2 reference list that echoes the paper's own title), producing
+        # a spurious self-citation edge.
+        if target_slug == source_ref or _node_slug(target) == slug:
+            skipped += 1
+            continue
         result = trellis.link_nodes(source_ref, target_slug, "references")
         if result.get("ok"):
             linked += 1

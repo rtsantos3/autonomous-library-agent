@@ -802,6 +802,26 @@ class TestIngestionUnit:
         assert result.linked == 0
         assert result.skipped == 1
 
+    def test_link_citations_skips_self_reference(self):
+        # A reference item with no stable id can resolve back to the source node
+        # via title matching; the linker must not create a self-citation edge.
+        citations = citation_result(
+            [CitationItem(None, None, None, "Source Paper", 2020)]
+        )
+        with patch(
+            "pipeline.ingestion.trellis.dedup_check",
+            return_value={"slug": "source"},
+        ), patch(
+            "pipeline.ingestion.trellis._resolve_to_uuid", return_value="source-id"
+        ), patch(
+            "pipeline.ingestion.trellis.link_nodes",
+            return_value={"ok": True},
+        ) as link:
+            result = ingestion.link_citations("source", citations)
+        assert result.linked == 0
+        assert result.skipped == 1
+        link.assert_not_called()
+
     def test_link_batch_counts_found_and_unfound_citations(self):
         citations = citation_result(
             [
