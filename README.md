@@ -49,12 +49,15 @@ local SQLite-backed knowledge graph) is an external dependency, not vendored her
 
 ### Workspace resolution
 
-The library a run targets is resolved with this precedence (shared by `setup.sh`,
-`export_graph.sh`, and `pipeline.trellis`):
+The library a run targets is resolved with this precedence:
 
 ```
-TRELLIS_WORKSPACE env var  >  config.yml `workspace:`  >  parent of this repo
+TRELLIS_WORKSPACE (env or .env)  >  config.yml `workspace:`  >  parent of this repo
 ```
+
+`pipeline.trellis`, `setup.sh`, and `export_graph.sh` follow this (`setup.sh` also
+reads `TRELLIS_WORKSPACE` from `.env`). `scripts/monitor.py` currently honours only
+the `TRELLIS_WORKSPACE` env var, not `config.yml`.
 
 Secrets (API keys) live only in `.env` (gitignored). Non-secret tuneables live in
 `config.yml` (gitignored; `config.yml.example` is tracked).
@@ -81,14 +84,14 @@ python -c "from pipeline.ingestion import ingest_batch; \
 dois=[l.strip() for l in open('samples/seed_dois.txt') if l.strip() and not l.startswith('#')]; \
 o,m=ingest_batch(dois); print(len(o),'ingested')"
 
-# resumable backfill over a large DOI list
-python scripts/backfill.py <dois.txt>
+# resumable backfill: (re)process nodes already in the graph, selected by status
+python scripts/backfill.py --statuses queued,scaffolded,failed
 
 # snapshot the graph to the shareable JSONL export
 ./scripts/export_graph.sh
 
-# watch pipeline status
-python scripts/monitor.py
+# watch pipeline status (set TRELLIS_WORKSPACE if config.yml is not the default)
+TRELLIS_WORKSPACE=<library-dir> python scripts/monitor.py
 ```
 
 ## Persistent-agent model
@@ -99,15 +102,17 @@ Trellis graph and is driven by `pipeline:*` status tags:
 
 ```
 queued → scaffolded → digesting → digested
-                                 ↘ partial / needs-review / failed
+                                 ↘ needs-review / failed
 ```
 
 Because the agent re-runs unsupervised, **every operation is idempotent**: identity
 tags are re-derived from the resolved record each pass (never accumulated), citation
 linking is guarded against duplicate edges by a read-only edge check (a pipeline-side
 workaround for the lack of an edge-uniqueness constraint in Trellis), and an in-flight
-`pipeline:digesting` marker makes a mid-run crash recoverable on the agent's next
-startup. Re-ingesting an unchanged batch is a no-op.
+`pipeline:digesting` marker lets the agent reset stale in-flight nodes to `failed`
+on its next startup (per `AGENT-CONTRACT.md`). Re-ingesting deduplicates nodes and
+never creates duplicate citation edges, though it may refresh a node's metadata,
+status, and annotations.
 
 ## Migrations
 
