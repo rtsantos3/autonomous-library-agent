@@ -30,22 +30,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sqlite3
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from pipeline.trellis import _workspace  # noqa: E402
+
 # --- Declaration -----------------------------------------------------------
 
-# Workspace resolution mirrors pipeline/trellis.py so the monitor always reads
-# the same graph the pipeline writes.
-_DEFAULT_WORKSPACE = str(Path(__file__).resolve().parents[2])
+# Reuse the pipeline's canonical workspace resolver (TRELLIS_WORKSPACE env ->
+# config.yml `workspace:` -> repo parent) so the monitor always reads the same
+# graph the pipeline writes, including when the target is set only in config.yml.
 
 
 def _db_path() -> str:
-    workspace = os.environ.get("TRELLIS_WORKSPACE", _DEFAULT_WORKSPACE)
-    return str(Path(workspace) / ".trellis" / "trellis.db")
+    return str(Path(_workspace()) / ".trellis" / "trellis.db")
 
 
 _MUTATION_COLUMNS = (
