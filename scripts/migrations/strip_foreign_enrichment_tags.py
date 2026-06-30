@@ -13,9 +13,13 @@ tags (kw:okr, kw:optokinetic-response, mesh-major:nystagmus-optokinetic, etc.)
 alongside the correct ones.  The earlier ``stale-citation-clear`` migration
 removed the foreign ``citation`` string but left those topical tags intact.
 
-The underlying ``_make_tags`` function has been fixed to drop and re-derive all
-source-derived topical namespaces (mesh:, kw:, field:, type:, year:) on every
-re-ingest, so this class of contamination cannot recur.
+The underlying ``_make_tags`` function has been fixed to drop and re-derive the
+source-derived topical namespaces (mesh:, kw:, field:, type:) whenever a
+re-ingest resolves topical data, so an enriched re-ingest — the path that caused
+this contamination — cannot reintroduce it. (Identity/status namespaces — pmid:,
+s2id:, year:, pipeline: — are always re-derived. A sparse re-ingest that resolves
+no topical data instead preserves the node's existing topical tags rather than
+wiping them: an idempotency guard against downgrading an already-enriched node.)
 
 This migration removes the residual foreign tags from the 7 affected nodes.
 
