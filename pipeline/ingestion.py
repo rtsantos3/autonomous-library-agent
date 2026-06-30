@@ -223,28 +223,32 @@ def _make_tags(
     existing_tags: Optional[list] = None,
     own_reference: Optional[dict] = None,
 ) -> list[str]:
-    # Carry forward only structural/provenance tags (source:, branch:, depth:,
-    # domain:, status:, and bare custom tags). All source-derived topical tags
-    # (mesh:, kw:, field:, type:, year:, pipeline:, s2id:, pmid:) are dropped and
-    # re-derived from the freshly resolved record below. This ensures that
-    # contaminated enrichment tags from a prior cross-wired ingest never survive a
-    # re-ingest rather than accumulating indefinitely alongside the correct ones.
-    _REDERIVED = (
-        "pipeline:",
-        "s2id:",
-        "pmid:",
-        "mesh:",
-        "mesh-major:",
-        "mesh-q:",
-        "kw:",
-        "field:",
-        "type:",
-        "year:",
+    # Identity/status tags are always dropped and re-derived (they are cheap and
+    # always available from the resolved record): pipeline:, s2id:, pmid:, year:.
+    _ALWAYS_REDERIVE = ("pipeline:", "s2id:", "pmid:", "year:")
+    # Topical tags (mesh:, kw:, field:, type:) are dropped-and-re-derived ONLY
+    # when the freshly resolved record actually carries topical data. Re-deriving
+    # from an enriched record clears any contaminated tags from a prior
+    # cross-wired ingest. But when enrichment was skipped (e.g. a title-only
+    # record with sufficient basic metadata resolves no mesh/fields), the
+    # resolved record contributes nothing — preserving the existing topical tags
+    # keeps a re-ingest idempotent instead of wiping a previously enriched node.
+    _TOPICAL = ("mesh:", "mesh-major:", "mesh-q:", "kw:", "field:", "type:")
+    resolved_has_topical = any(
+        [
+            resolved.fields_of_study,
+            resolved.publication_types,
+            resolved.mesh_terms,
+            resolved.keywords,
+            resolved.mesh_major,
+            resolved.mesh_qualifiers,
+        ]
     )
+    drop_prefixes = _ALWAYS_REDERIVE + (_TOPICAL if resolved_has_topical else ())
     tags = [
         canonical_type_tag(t)
         for t in (existing_tags or [])
-        if not str(t).startswith(_REDERIVED)
+        if not str(t).startswith(drop_prefixes)
     ]
     own_reference = own_reference or {}
     own_s2_id = resolved.s2_id or _blank_to_none(own_reference.get("s2_id"))
@@ -906,6 +910,12 @@ def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult
     node = trellis.get_node(slug)
     current_meta = dict(node.get("metadata") or {})
     ref = dict(current_meta.get("reference") or {})
+    existing_items = (ref.get("outbound_citations") or {}).get("items") or []
+    # Idempotency guard: a re-ingest that fetched no citations (e.g. a title-only
+    # record that never resolved a DOI) must not erase the citation set a prior
+    # enriched run already stored. Only overwrite when we actually have citations.
+    if not citations.items and existing_items:
+        return CitationStoreResult(stored=len(existing_items))
     ref["outbound_citations"] = {
         "source": citations.source,
         "retrieved_at": citations.retrieved_at,

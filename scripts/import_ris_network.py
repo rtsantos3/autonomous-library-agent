@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -203,6 +205,9 @@ def _outcome_status(outcome) -> str:
 
 
 def main() -> int:
+    # Enrichment (PubMed / S2 / Crossref) reads API keys from .env, matching
+    # backfill.py; without this the pipeline runs key-less and gets rate-limited.
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="Import RIS records into Trellis via the ingestion pipeline."
     )
