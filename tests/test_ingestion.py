@@ -699,31 +699,6 @@ class TestIngestionUnit:
         assert "mesh:gastrointestinal-microbiome" in tags
         assert "kw:short-chain-fatty-acids" in tags
 
-    def test_make_tags_preserves_topical_when_resolved_has_none(self):
-        # Idempotency guard (B): a sparse re-ingest (e.g. a title-only record
-        # whose enrichment was skipped) carries no topical data. Existing
-        # mesh:/kw:/field: tags must survive instead of being wiped; identity and
-        # status tags (year:, pipeline:) are still re-derived.
-        existing_tags = [
-            "pipeline:digested",
-            "source:ris",
-            "mesh:gut-microbiome",
-            "kw:diet",
-            "field:biology",
-            "year:2010",
-        ]
-        sparse = resolved()  # all topical fields default to empty
-        tags = ingestion._make_tags(sparse, existing_tags)
-        assert "mesh:gut-microbiome" in tags
-        assert "kw:diet" in tags
-        assert "field:biology" in tags
-        assert "source:ris" in tags
-        # status/identity are always re-derived, not carried forward
-        assert "pipeline:digested" not in tags
-        assert "pipeline:scaffolded" in tags
-        assert "year:2010" not in tags
-        assert "year:2024" in tags
-
     # store_citations
     def test_store_merges_into_existing_metadata(self):
         node = {"metadata": {"reference": {"doi": "10.1/x"}, "other": {"x": 1}}}
@@ -759,23 +734,6 @@ class TestIngestionUnit:
         assert items == [
             {"doi": None, "pmid": None, "s2_id": None, "title": "New", "year": None}
         ]
-
-    def test_store_empty_does_not_overwrite_existing_citations(self):
-        # Idempotency guard (A): a re-ingest that fetched no citations (title-only
-        # record, no resolved DOI) must not erase a previously stored citation set.
-        node = {
-            "metadata": {
-                "reference": {
-                    "outbound_citations": {"items": [{"title": "Kept"}, {"title": "B"}]}
-                }
-            }
-        }
-        with patch("pipeline.ingestion.trellis.get_node", return_value=node), patch(
-            "pipeline.ingestion.trellis.update_node"
-        ) as update:
-            result = ingestion.store_citations("source", citation_result([]))
-        update.assert_not_called()
-        assert result.stored == 2
 
     def test_store_update_node_runtime_error_propagates(self):
         with patch(
@@ -1590,6 +1548,58 @@ class TestIngestionUnit:
         assert result is None
         assert outcome.errors == ["upsert failed"]
         set_status.assert_not_called()
+
+
+class TestIdempotencyGuards:
+    """Re-ingesting an existing node must never downgrade it.
+
+    A title-only re-ingest whose enrichment is skipped resolves no topical data
+    and no DOI; without these guards _make_tags would strip the node's topical
+    tags to nothing and store_citations would overwrite its stored citations with
+    an empty set. See the end-to-end check in
+    TestRisPipelineIntegration.test_title_only_reingest_does_not_wipe_enrichment.
+    """
+
+    def test_make_tags_preserves_topical_when_resolved_has_none(self):
+        # Guard B: a sparse re-ingest carries no topical data, so existing
+        # mesh:/kw:/field: tags must survive; identity/status tags (year:,
+        # pipeline:) are still re-derived.
+        existing_tags = [
+            "pipeline:digested",
+            "source:ris",
+            "mesh:gut-microbiome",
+            "kw:diet",
+            "field:biology",
+            "year:2010",
+        ]
+        sparse = resolved()  # all topical fields default to empty
+        tags = ingestion._make_tags(sparse, existing_tags)
+        assert "mesh:gut-microbiome" in tags
+        assert "kw:diet" in tags
+        assert "field:biology" in tags
+        assert "source:ris" in tags
+        # status/identity are always re-derived, not carried forward
+        assert "pipeline:digested" not in tags
+        assert "pipeline:scaffolded" in tags
+        assert "year:2010" not in tags
+        assert "year:2024" in tags
+
+    def test_store_empty_does_not_overwrite_existing_citations(self):
+        # Guard A: a re-ingest that fetched no citations must not erase a
+        # previously stored citation set.
+        node = {
+            "metadata": {
+                "reference": {
+                    "outbound_citations": {"items": [{"title": "Kept"}, {"title": "B"}]}
+                }
+            }
+        }
+        with patch("pipeline.ingestion.trellis.get_node", return_value=node), patch(
+            "pipeline.ingestion.trellis.update_node"
+        ) as update:
+            result = ingestion.store_citations("source", citation_result([]))
+        update.assert_not_called()
+        assert result.stored == 2
 
 
 @pytest.mark.integration
