@@ -69,9 +69,7 @@ def _trellis(*args: str, json_output: bool = True) -> subprocess.CompletedProces
     if json_output and "--json" not in cmd:
         cmd.append("--json")
     # Trellis calls target the resolved workspace, not the ambient cwd.
-    return subprocess.run(
-        cmd, cwd=_workspace(), capture_output=True, text=True, timeout=15
-    )
+    return subprocess.run(cmd, cwd=_workspace(), capture_output=True, text=True)
 
 
 def _doi_exists(doi: str) -> Optional[str]:
@@ -99,7 +97,7 @@ def load_existing_dois() -> dict:
     """
     dois = {}
     for tag in PIPELINE_TAGS:
-        r = _trellis("find", "--tag", tag)
+        r = _trellis("find", "--tag", tag, "--limit", "5000")
         try:
             nodes = json.loads(r.stdout) if r.stdout.strip() else []
         except (json.JSONDecodeError, ValueError):
@@ -159,7 +157,7 @@ def load_existing_titles() -> dict:
     """
     titles = {}
     for tag in PIPELINE_TAGS:
-        r = _trellis("find", "--tag", tag)
+        r = _trellis("find", "--tag", tag, "--limit", "5000")
         try:
             nodes = json.loads(r.stdout) if r.stdout.strip() else []
         except (json.JSONDecodeError, ValueError):
@@ -295,9 +293,7 @@ def ingest_paper(
 
     # --- Execute ---
     # Trellis calls target the resolved workspace, not the ambient cwd.
-    r = subprocess.run(
-        cmd, cwd=_workspace(), capture_output=True, text=True, timeout=15
-    )
+    r = subprocess.run(cmd, cwd=_workspace(), capture_output=True, text=True)
 
     if r.returncode == 0:
         try:
