@@ -249,6 +249,23 @@ def main() -> int:
         print("no RIS records parsed")
         return 1
 
+    # Collapse duplicate records before ingesting. EndNote RIS exports often
+    # repeat the same entry; the pipeline's dedup only sees the graph as it was
+    # at batch start, so two identical new records would each create a node.
+    # Key on DOI when present, else the title; keep first occurrence.
+    seen: set[str] = set()
+    unique: list[RisRecord] = []
+    for record in records:
+        key = record.doi or record.title.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(record)
+    dropped = len(records) - len(unique)
+    records = unique
+    if dropped:
+        print(f"deduped   : dropped {dropped} duplicate record(s)")
+
     print(f"records   : {len(records)}")
     print()
     for i, record in enumerate(records, 1):
