@@ -41,5 +41,6 @@ diag.py
 # Benchmark results — accumulate locally, not committed
 tests/results/
 
-# Local development journal — never committed
+# Local development docs — never committed
 docs/journal_logs.md
+docs/plans/
