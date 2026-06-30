@@ -482,10 +482,30 @@ def _pubmed_fetch(pmid: str) -> dict:
 
 def _fill_from_pubmed(parsed: ParseResult, fields: dict) -> str:
     try:
+        searched = not parsed.pmid
         pmid = parsed.pmid or _pubmed_search(parsed)
         if not pmid:
             return fields["source"]
         fetched = _pubmed_fetch(pmid)
+        # When the PMID came from a search (not supplied by the caller), verify
+        # the fetched title matches the known title before accepting the record.
+        # PubMed esearch does fuzzy text matching and can return an unrelated
+        # paper when the DOI is unknown to PubMed (e.g. preprints, proceedings).
+        if searched and fetched.get("title"):
+            from rapidfuzz.fuzz import token_sort_ratio
+
+            from pipeline.trellis import _norm_title
+
+            known = _norm_title(fields.get("title") or parsed.title or "")
+            candidate = _norm_title(fetched["title"])
+            if known and token_sort_ratio(known, candidate) < 85:
+                logger.warning(
+                    "_fill_from_pubmed: title mismatch for pmid=%s "
+                    "(score=%d) — skipping PubMed record",
+                    pmid,
+                    token_sort_ratio(known, candidate),
+                )
+                return fields["source"]
         fields.update(
             _merge_missing(
                 fields,
