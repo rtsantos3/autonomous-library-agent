@@ -75,7 +75,6 @@ def trellis(*args: str) -> subprocess.CompletedProcess:
         cwd=_workspace(),
         capture_output=True,
         text=True,
-        timeout=30,
     )
 
 
@@ -600,15 +599,21 @@ def main() -> int:
         help="Parse and report without writing to Trellis",
     )
     args = parser.parse_args()
+    print(f"workspace : {_workspace()}")
+    print(f"path      : {args.path}")
 
     root = Path(args.path)
     ris_files = collect_ris_files(root)
     if not ris_files:
-        print(f"No RIS files found under {root}")
+        print(f"no RIS files found under {root}")
         return 1
 
+    print(f"files     : {len(ris_files)}")
+    print("loading existing DOIs and titles from graph...")
     doi_cache = load_existing_dois()
     title_cache = load_existing_titles()
+    print(f"graph     : {len(doi_cache)} existing DOIs, {len(title_cache)} titles")
+    print()
 
     imported = 0
     skipped = 0
@@ -623,7 +628,9 @@ def main() -> int:
             failed += 1
             continue
 
-        for record in records:
+        for i, record in enumerate(records, 1):
+            print(f"[{i}/{len(records)}] {record.title[:70]}")
+            print(f"         doi={record.doi or 'none'}  year={record.year or '?'}")
             outcome = orchestrate_reference_ingestion(
                 record,
                 source="ris",
@@ -637,12 +644,17 @@ def main() -> int:
             if outcome.imported:
                 imported += 1
                 linked += outcome.linked_edges
+                print(
+                    f"         -> imported  slug={outcome.slug}  edges={outcome.linked_edges}"
+                )
             else:
                 skipped += 1
+                print(
+                    f"         -> skipped   ({outcome.skipped_reason or 'duplicate'})"
+                )
+            print()
 
-    print(
-        f"Imported={imported} Skipped={skipped} Linked={linked} Files={len(ris_files)}"
-    )
+    print(f"=== done: imported={imported} skipped={skipped} linked={linked} ===")
 
     if args.dry_run or (not args.seed_doi and not args.seed_title):
         return 0
