@@ -223,19 +223,28 @@ def _make_tags(
     existing_tags: Optional[list] = None,
     own_reference: Optional[dict] = None,
 ) -> list[str]:
-    # Carry forward existing tags, dropping the pipeline:* marker (re-set below)
-    # and healing any stale camelCase type:* tag so re-ingested nodes self-correct
-    # the JournalArticle/journal-article duplication without a separate migration.
-    #
-    # Also drop carried-forward s2id:/pmid: identity tags: these must describe THIS
-    # node only and are re-derived below. During degraded re-ingests, `resolved`
-    # may be missing identifiers, so fall back to the node's merged reference
-    # metadata: that is the authoritative own identity and avoids preserving
-    # foreign carried tags that would mis-route build_node_index lookups.
+    # Carry forward only structural/provenance tags (source:, branch:, depth:,
+    # domain:, status:, and bare custom tags). All source-derived topical tags
+    # (mesh:, kw:, field:, type:, year:, pipeline:, s2id:, pmid:) are dropped and
+    # re-derived from the freshly resolved record below. This ensures that
+    # contaminated enrichment tags from a prior cross-wired ingest never survive a
+    # re-ingest rather than accumulating indefinitely alongside the correct ones.
+    _REDERIVED = (
+        "pipeline:",
+        "s2id:",
+        "pmid:",
+        "mesh:",
+        "mesh-major:",
+        "mesh-q:",
+        "kw:",
+        "field:",
+        "type:",
+        "year:",
+    )
     tags = [
         canonical_type_tag(t)
         for t in (existing_tags or [])
-        if not str(t).startswith(("pipeline:", "s2id:", "pmid:"))
+        if not str(t).startswith(_REDERIVED)
     ]
     own_reference = own_reference or {}
     own_s2_id = resolved.s2_id or _blank_to_none(own_reference.get("s2_id"))
