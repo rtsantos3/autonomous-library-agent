@@ -15,7 +15,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
-ENV_PREFIX="$REPO_ROOT/setup"
+ENV_NAME="autonomous-library-agent"
 # The Trellis workspace defaults to the parent of this pipeline repo (matches
 # pipeline/trellis.py's default and the submodule-in-library layout). The graph
 # export lives at <workspace>/graph/. Override via TRELLIS_WORKSPACE in .env.
@@ -31,14 +31,14 @@ say "Checking for conda"
 command -v conda >/dev/null 2>&1 || die "conda not found on PATH. Install Miniconda/Anaconda first."
 ok "conda: $(command -v conda)"
 
-# 2. conda env (prefix env at ./setup, gitignored). Never recreate an existing
+# 2. conda env (named env: autonomous-library-agent). Never recreate an existing
 #    one — matches the project rule of not destroying conda environments.
-say "Setting up conda environment at ./setup"
-if [ -d "$ENV_PREFIX" ]; then
-  ok "env already exists at ./setup (left untouched)"
+say "Setting up conda environment '$ENV_NAME'"
+if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+  ok "env '$ENV_NAME' already exists (left untouched)"
 else
-  conda env create -p "$ENV_PREFIX" -f environment.yml
-  ok "created conda env at ./setup"
+  conda env create -n "$ENV_NAME" -f environment.yml
+  ok "created conda env '$ENV_NAME'"
 fi
 
 # 3. .env (never overwrite) ----------------------------------------------------
@@ -161,7 +161,7 @@ fi
 
 # 6. smoke test (offline only) -------------------------------------------------
 say "Running offline test suite (smoke check)"
-conda run -p "$ENV_PREFIX" python -m pytest tests/ -q
+conda run -n "$ENV_NAME" python -m pytest tests/ -q
 
 say "Setup complete."
 cat <<EOF
@@ -169,7 +169,7 @@ cat <<EOF
 Next steps:
   1. Edit .env and add your API keys (NCBI_API_KEY, S2_API_KEY, CROSSREF_EMAIL, ...).
   2. Activate the environment:
-       conda activate $ENV_PREFIX
+       conda activate $ENV_NAME
   3. Try a sample batch ingest with the DOIs in samples/seed_dois.txt:
        python -c "from pipeline.ingestion import ingest_batch; \\
 dois=[l.strip() for l in open('samples/seed_dois.txt') if l.strip() and not l.startswith('#')]; \\

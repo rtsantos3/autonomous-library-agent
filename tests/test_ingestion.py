@@ -667,9 +667,13 @@ class TestIngestionUnit:
                 resolved(), DedupResult({"tags": [], "metadata": {}}, "doi")
             )
 
-    def test_upsert_existing_replaces_pipeline_tag_preserves_and_merges_topical_tags(
+    def test_upsert_existing_replaces_pipeline_tag_preserves_structural_resets_topical(
         self,
     ):
+        # _make_tags drops all source-derived topical tags (mesh:, kw:, field:,
+        # type:, year:) from the existing node and re-derives them from the fresh
+        # resolved record. Structural/provenance tags (source:) are preserved.
+        # This prevents stale cross-wired enrichment tags from surviving re-ingests.
         existing = {
             "slug": "old",
             "metadata": {},
@@ -689,7 +693,9 @@ class TestIngestionUnit:
         assert "pipeline:queued" not in tags
         assert "pipeline:scaffolded" in tags
         assert "source:manual" in tags
-        assert "mesh:old-term" in tags
+        # stale mesh tag from prior enrichment is dropped, not carried forward
+        assert "mesh:old-term" not in tags
+        # fresh tags from the resolved record are present
         assert "mesh:gastrointestinal-microbiome" in tags
         assert "kw:short-chain-fatty-acids" in tags
 
