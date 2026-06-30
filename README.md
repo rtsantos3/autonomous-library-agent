@@ -37,8 +37,7 @@ pipeline/
   _http.py        HTTP with retry/backoff
 scripts/
   backfill.py     resumable batch orchestrator over a DOI list
-  ingest.py       single-paper CLI; load existing dois/titles
-  import_ris_network.py / scaffold_from_endnote.py / feed_csv.py   importers
+  import_ris_network.py  RIS importer; parses records and feeds ingest_batch()
   export_graph.sh slim JSONL snapshot of the graph (mutation_log stripped)
   monitor.py      live pipeline-status dashboard
   migrations/     one-time data-repair migrations (dry-run by default)
@@ -83,6 +82,9 @@ Then edit `.env` with your keys (`NCBI_API_KEY`, `S2_API_KEY`, `CROSSREF_EMAIL`,
 python -c "from pipeline.ingestion import ingest_batch; \
 dois=[l.strip() for l in open('samples/seed_dois.txt') if l.strip() and not l.startswith('#')]; \
 o,m=ingest_batch(dois); print(len(o),'ingested')"
+
+# import an RIS file/dir end-to-end (parse → ingest_batch: enrich + dedup + link)
+python scripts/import_ris_network.py path/to/library.ris
 
 # resumable backfill: (re)process nodes already in the graph, selected by status
 python scripts/backfill.py --statuses queued,scaffolded,failed

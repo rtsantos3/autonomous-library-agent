@@ -480,3 +480,129 @@ class TestIngestBatch:
         find_by_pmid.assert_not_called()
         find_by_title.assert_not_called()
         grep_nodes.assert_not_called()
+
+
+class TestBatchItemNormalization:
+    def test_as_raw_input_wraps_string_doi(self):
+        assert ingestion._as_raw_input("10.1/x") == {"doi": "10.1/x"}
+
+    def test_as_raw_input_passes_dict_through(self):
+        record = {"title": "T", "doi": "10.1/x", "authors": ["A"]}
+        assert ingestion._as_raw_input(record) is record
+
+    def test_as_raw_input_rejects_other_types(self):
+        try:
+            ingestion._as_raw_input(123)
+        except TypeError as exc:
+            assert "str or dict" in str(exc)
+        else:
+            raise AssertionError("expected TypeError")
+
+    def test_item_doi_extracts_from_string_and_dict(self):
+        assert ingestion._item_doi("10.1/x") == "10.1/x"
+        assert ingestion._item_doi({"doi": "10.1/y"}) == "10.1/y"
+        assert ingestion._item_doi({"title": "no doi"}) is None
+
+    def test_resolve_and_upsert_handles_titleonly_dict_without_prefetch(self):
+        # A DOI-less record must funnel through parse_input as a full dict and
+        # must NOT consult the DOI-keyed prefetch map.
+        outcomes = [IngestionOutcome()]
+        record = {
+            "title": "A title-only microbiome paper",
+            "authors": ["Author A"],
+            "year": "2024",
+        }
+        prefetch_calls = []
+
+        def prefetch(doi):
+            prefetch_calls.append(doi)
+            return prefetched()
+
+        with patch(
+            "pipeline.ingestion.resolve_identity", return_value=resolved(doi=None)
+        ) as resolve, patch(
+            "pipeline.ingestion.find_existing_indexed",
+            return_value=DedupResult(None, None),
+        ), patch(
+            "pipeline.ingestion.upsert_node", return_value=UpsertResult("slug-t", True)
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ):
+            result = ingestion.resolve_and_upsert(
+                (0, record),
+                outcomes,
+                prefetch,
+                [],
+                [],
+                threading.Lock(),
+                {"by_doi": {}},
+            )
+
+        # No DOI resolved → citation_doi is None; downstream fetch no-ops.
+        assert result == (0, None, "slug-t")
+        assert outcomes[0].parse.title == "A title-only microbiome paper"
+        assert outcomes[0].parse.doi is None
+        assert prefetch_calls == []
+        resolve.assert_called_once_with(outcomes[0].parse, prefetched=None)
+
+    def test_ingest_batch_accepts_mixed_string_and_dict_items(self):
+        items = [
+            "10.1/a",
+            {"title": "Title only paper about microbiome diversity", "year": "2024"},
+            {"title": "Has DOI", "doi": "10.1/c"},
+        ]
+
+        c_prefetch = prefetched(doi="10.1/c", s2_id="s2-c", title="Has DOI batch")
+        seen_prefetch = {}
+
+        def resolve_identity(parsed, prefetched=None):
+            seen_prefetch[parsed.doi] = prefetched
+            return resolved(
+                title=parsed.title or "resolved title",
+                doi=parsed.doi,
+                source="s2-batch" if prefetched else "input-only",
+            )
+
+        with patch(
+            "pipeline.aggregator.batch_resolve", return_value={"10.1/c": c_prefetch}
+        ) as batch_resolve, patch(
+            "pipeline.ingestion.trellis.build_node_index",
+            return_value={},
+        ), patch(
+            "pipeline.ingestion.trellis.reverse_materialize"
+        ), patch(
+            "pipeline.ingestion.resolve_identity", side_effect=resolve_identity
+        ), patch(
+            "pipeline.ingestion.find_existing_indexed",
+            return_value=DedupResult(None, None),
+        ), patch(
+            "pipeline.ingestion.upsert_node",
+            side_effect=lambda r, d: UpsertResult(f"slug-{r.title[:3]}", True),
+        ), patch(
+            "pipeline.ingestion.store_citations",
+            return_value=ingestion.CitationStoreResult(0),
+        ), patch(
+            "pipeline.ingestion.link_citations", return_value=ingestion.LinkResult(0, 0)
+        ), patch(
+            "pipeline.ingestion.verify_outcome",
+            return_value=ingestion.VerifyResult(True, True, "digested", 0),
+        ), patch(
+            "pipeline.ingestion.trellis.set_pipeline_status"
+        ), patch(
+            "pipeline.ingestion.fetch_outbound_citations",
+            return_value=citation_result(),
+        ):
+            outcomes, _metrics = ingestion.ingest_batch(items, workers=2)
+
+        # Only the two DOI-bearing items contribute to the S2 batch prefetch.
+        batch_resolve.assert_called_once_with(["10.1/a", "10.1/c"])
+        assert len(outcomes) == 3
+        assert outcomes[0].parse.doi == "10.1/a"
+        assert outcomes[1].parse.doi is None
+        assert outcomes[1].parse.title == "Title only paper about microbiome diversity"
+        assert outcomes[2].parse.doi == "10.1/c"
+        assert all(not o.errors for o in outcomes)
+        # The DOI-bearing dict reuses the S2 batch prefetch; the title-only dict
+        # gets no prefetch and falls back to per-paper enrichment.
+        assert seen_prefetch["10.1/c"] is c_prefetch
+        assert seen_prefetch[None] is None

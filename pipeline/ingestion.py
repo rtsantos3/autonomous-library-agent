@@ -1059,8 +1059,30 @@ def format_metrics_table(metrics: BatchMetrics) -> str:
     return "\n".join(lines)
 
 
+def _as_raw_input(item: "str | dict") -> dict:
+    # A batch item is either a bare DOI string (the historical contract) or a
+    # full record dict from a non-DOI source (e.g. an RIS entry with only a
+    # title). Both funnel through parse_input so there is exactly one ingestion
+    # path; a string is just the degenerate {"doi": ...} case.
+    if isinstance(item, str):
+        return {"doi": item}
+    if isinstance(item, dict):
+        return item
+    raise TypeError(f"batch item must be str or dict, got {type(item).__name__}")
+
+
+def _item_doi(item: "str | dict") -> Optional[str]:
+    # Prefetch keys are DOIs; dict records without one fall back to per-paper
+    # enrichment inside resolve_identity, so absence here is expected.
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return item.get("doi")
+    return None
+
+
 def resolve_and_upsert(
-    item: tuple[int, str],
+    item: tuple[int, "str | dict"],
     outcomes: list[IngestionOutcome],
     prefetched_for_doi,
     resolve_timings: list[float],
@@ -1068,13 +1090,14 @@ def resolve_and_upsert(
     timing_lock: threading.Lock,
     index: dict,
 ) -> Optional[tuple[int, str, str]]:
-    idx, doi = item
+    idx, raw_item = item
     outcome = outcomes[idx]
     try:
-        outcome.parse = parse_input({"doi": doi})
+        outcome.parse = parse_input(_as_raw_input(raw_item))
+        doi = _item_doi(raw_item)
         t0 = time.perf_counter()
         outcome.resolve = resolve_identity(
-            outcome.parse, prefetched=prefetched_for_doi(doi)
+            outcome.parse, prefetched=prefetched_for_doi(doi) if doi else None
         )
         resolve_elapsed = time.perf_counter() - t0
         outcome.dedup = find_existing_indexed(outcome.resolve, index)
@@ -1110,12 +1133,13 @@ def fetch_and_store(
     item: tuple[int, str, str],
     outcomes: list[IngestionOutcome],
     prefetched_for_doi,
-    dois: list[str],
+    items: "list[str | dict]",
 ) -> Optional[tuple[int, str, CitationResult]]:
     idx, doi, slug = item
     outcome = outcomes[idx]
     try:
-        prefetched = prefetched_for_doi(dois[idx])
+        item_doi = _item_doi(items[idx])
+        prefetched = prefetched_for_doi(item_doi) if item_doi else None
         if prefetched is not None and prefetched.citations:
             citations = CitationResult(
                 source="s2-batch",
@@ -1123,7 +1147,9 @@ def fetch_and_store(
                 items=prefetched.citations,
             )
         else:
-            citations = fetch_outbound_citations(doi)
+            # doi may be None for a title-only record that never resolved an
+            # identifier; outbound-citation fetch is DOI-keyed so it no-ops.
+            citations = fetch_outbound_citations(doi or "")
         outcome.citation_store = store_citations(slug, citations)
         return idx, slug, citations
     except Exception as e:
@@ -1319,28 +1345,35 @@ def backfill_nodes(
 
 
 def ingest_batch(
-    dois: list[str], workers: int = 8
+    items: "list[str | dict]", workers: int = 8
 ) -> tuple[list[IngestionOutcome], BatchMetrics]:
+    # items: a list whose elements are either bare DOI strings (historical
+    # contract) or full record dicts (e.g. RIS entries, possibly DOI-less).
+    # There is one ingestion path: every element is normalized by parse_input
+    # inside resolve_and_upsert. DOI strings still drive the S2 batch prefetch;
+    # dict records contribute their DOI to the prefetch when they have one and
+    # otherwise fall back to per-paper enrichment in resolve_identity.
     batch_t0 = time.perf_counter()
     phases: list[PhaseMetrics] = []
 
-    def add_phase(name: str, wall_seconds: float, items: int) -> None:
-        per_item_seconds = wall_seconds / items if items else 0.0
+    def add_phase(name: str, wall_seconds: float, count: int) -> None:
+        per_item_seconds = wall_seconds / count if count else 0.0
         phases.append(
             PhaseMetrics(
                 name=name,
                 wall_seconds=wall_seconds,
                 per_item_seconds=per_item_seconds,
-                items=items,
+                items=count,
             )
         )
 
     from pipeline.aggregator import batch_resolve
 
     t0 = time.perf_counter()
-    resolved_map = batch_resolve(dois)
+    prefetch_dois = [doi for doi in (_item_doi(item) for item in items) if doi]
+    resolved_map = batch_resolve(prefetch_dois)
     elapsed = time.perf_counter() - t0
-    add_phase("phase0 batch resolve", elapsed, len(dois))
+    add_phase("phase0 batch resolve", elapsed, len(items))
 
     def prefetched_for_doi(doi: str):
         key = bare_doi(doi)
@@ -1352,7 +1385,7 @@ def ingest_batch(
     node_count_at_index = len(index)
     add_phase("index build", elapsed, node_count_at_index)
 
-    outcomes = [IngestionOutcome() for _ in dois]
+    outcomes = [IngestionOutcome() for _ in items]
     resolve_timings: list[float] = []
     upsert_timings: list[float] = []
     timing_lock = threading.Lock()
@@ -1370,11 +1403,11 @@ def ingest_batch(
                     timing_lock,
                     index,
                 ),
-                enumerate(dois),
+                enumerate(items),
             )
         )
     elapsed = time.perf_counter() - t0
-    add_phase("phase1 resolve+upsert", elapsed, len(dois))
+    add_phase("phase1 resolve+upsert", elapsed, len(items))
     add_phase(
         "phase1 resolve_identity aggregate", sum(resolve_timings), len(resolve_timings)
     )
@@ -1414,7 +1447,7 @@ def ingest_batch(
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         phase2_results = list(
             executor.map(
-                lambda item: fetch_and_store(item, outcomes, prefetched_for_doi, dois),
+                lambda item: fetch_and_store(item, outcomes, prefetched_for_doi, items),
                 upserted,
             )
         )
