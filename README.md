@@ -61,6 +61,50 @@ the `TRELLIS_WORKSPACE` env var, not `config.yml`.
 Secrets (API keys) live only in `.env` (gitignored). Non-secret tuneables live in
 `config.yml` (gitignored; `config.yml.example` is tracked).
 
+## Ingestion pipeline
+
+There is **one** ingestion pipeline: `pipeline.ingestion.ingest_batch`. RIS
+import, backfill, and single-paper requests all feed it — nothing creates nodes
+by hand-rolling `trellis add`/`link`.
+
+**Input** is `list[str | dict]`: a string is a bare DOI; a dict is a full record
+(`title`, optional `doi`/`pmid`/`abstract`/`authors`/`year`/`venue`). Both
+normalize through `parse_input`, so a DOI-less record (e.g. a title-only RIS
+entry) takes the same path — it just skips the DOI batch prefetch and is enriched
+per-paper. A dict needs at least a DOI, a PMID, or a ≥ 10-char title.
+
+Per batch, in order:
+
+1. **batch resolve** — one Semantic Scholar batch call prefetches every DOI in
+   the batch.
+2. **resolve + upsert** — for each item: `parse_input` → `resolve_identity`
+   (enrich via PubMed → Semantic Scholar → Crossref, merging only missing
+   fields) → dedup against an in-memory index (**s2_id → doi → pmid → title**) →
+   `upsert_node` (create new, or merge into the existing node) → mark
+   `pipeline:digesting`.
+3. **reverse materialize** — existing nodes that cite this paper get a
+   `references` edge to it (inbound linking).
+4. **fetch + store** — fetch the paper's outbound citations and store them on the
+   node.
+5. **link** — materialize `references` edges to every cited target already in the
+   graph (deduped against a pre-built edge index).
+6. **verify + status** — confirm state, then set `pipeline:digested` (success) or
+   `pipeline:needs-review` / `pipeline:failed`.
+
+Enrichment guards: a PMID found by *search* is accepted only if its title fuzzy-
+matches the known title (≥ 85), rejecting PubMed false matches on unindexed DOIs.
+
+**Idempotency** (the agent re-runs unsupervised, so re-ingest must be a no-op):
+dedup converges re-ingests onto one node; identity/status tags are re-derived
+each pass; topical tags (`mesh:`/`kw:`/`field:`/`type:`) are re-derived only when
+the resolved record carries topical data and otherwise **preserved**, so a sparse
+re-ingest never wipes a previously enriched node; and `store_citations` never
+overwrites a non-empty citation set with an empty one. The pipeline produces
+`pipeline:digested` directly and never emits `pipeline:scaffolded` (a legacy stub
+state from the retired single-paper scaffolder).
+
+See `AGENT-CONTRACT.md` → *Ingestion Pipeline* for the agent-facing contract.
+
 ## Setup
 
 ```bash
@@ -100,21 +144,25 @@ TRELLIS_WORKSPACE=<library-dir> python scripts/monitor.py
 
 `AGENT-CONTRACT.md` is the runtime contract for an autonomous agent that operates this
 pipeline in a loop. It keeps **no memory across sessions** — all state lives in the
-Trellis graph and is driven by `pipeline:*` status tags:
+Trellis graph and is driven by `pipeline:*` status tags. The canonical pipeline
+drives a node:
 
 ```
-queued → scaffolded → digesting → digested
-                                 ↘ needs-review / failed
+queued → digesting → digested
+                   ↘ needs-review / failed
 ```
+
+(`scaffolded` is a legacy stub state; `ingest_batch` does not emit it.)
 
 Because the agent re-runs unsupervised, **every operation is idempotent**: identity
-tags are re-derived from the resolved record each pass (never accumulated), citation
-linking is guarded against duplicate edges by a read-only edge check (a pipeline-side
-workaround for the lack of an edge-uniqueness constraint in Trellis), and an in-flight
-`pipeline:digesting` marker lets the agent reset stale in-flight nodes to `failed`
-on its next startup (per `AGENT-CONTRACT.md`). Re-ingesting deduplicates nodes and
-never creates duplicate citation edges, though it may refresh a node's metadata,
-status, and annotations.
+tags are re-derived from the resolved record each pass (never accumulated) while
+topical tags and stored citations are preserved when a re-ingest resolves none
+(no downgrade); citation linking is guarded against duplicate edges by a read-only
+edge check (a pipeline-side workaround for the lack of an edge-uniqueness constraint
+in Trellis); and an in-flight `pipeline:digesting` marker lets the agent reset stale
+in-flight nodes to `failed` on its next startup (per `AGENT-CONTRACT.md`).
+Re-ingesting deduplicates nodes and never creates duplicate citation edges, though
+it may refresh a node's metadata, status, and annotations.
 
 ## Migrations
 

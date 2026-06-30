@@ -17,22 +17,23 @@ Run continuously. Each cycle (max 50 nodes per cycle):
 #### Phase A — Startup Check
 1. `trellis find --tag pipeline:digesting --json` → if any results, set them to `pipeline:failed` and notify user via Telegram ("stale digesting nodes found: [slugs]").
 
-#### Phase B — Ingestion (scaffold queued nodes)
-1. `trellis find --tag pipeline:queued --json` → get list of queued nodes.
-2. For each node:
-   a. Read the node URI (DOI) or title.
-   b. Use **Paper Search MCP** to fetch metadata (title, abstract, authors, year, venue, DOI, PMID).
-   c. If the source provides keywords or MeSH terms, include them as tags. Normalize: lowercase, replace spaces with hyphens, prefix with `mesh:` for MeSH terms and `kw:` for author keywords. Example: `mesh:colitis`, `mesh:dietary-fats`, `kw:gut-microbiome`.
-   d. Update the node: `trellis update <slug> --description "<abstract>" --tags "pipeline:scaffolded,year:<year>,mesh:<term1>,mesh:<term2>,kw:<kw1>"`.
-   e. Annotate: `trellis annotate <slug> "[YYYY-MM-DD] Scaffolded via <source>"`.
-   f. Fetch citation graph from Semantic Scholar (via MCP or direct API):
-      - `GET /graph/v1/paper/DOI:<doi>/references` → outbound citations
-      - `GET /graph/v1/paper/DOI:<doi>/citations` → inbound citations
-   g. For each cited/citing paper:
-      - Check Trellis: `trellis find --text "<doi>" --json` → does it exist?
-      - If not: `trellis add reference "<title>" --uri "https://doi.org/<doi>" --tags "pipeline:queued,depth:<n>" --parent microbiome-research-library --json`
-      - Link: `trellis link <source-slug> <target-slug> --relation cites`
-   h. Max citation expansion: 2 hops (track via `depth:<n>` tag, stop when `depth:2`).
+#### Phase B — Ingestion (canonical pipeline)
+
+Ingestion is performed by `pipeline.ingestion.ingest_batch` — **not** by
+hand-rolled `trellis add` / `trellis link` calls (see **Ingestion Pipeline**).
+The pipeline resolves identity, enriches metadata, dedups, stores and links
+citations, and sets final status in one pass.
+
+1. `trellis find --tag pipeline:queued --json` → get queued nodes.
+2. Collect each node's DOI (from its `uri` / `metadata.reference.doi`); for nodes
+   with only a title, build a record dict instead.
+3. Call `ingest_batch([...])` with that list of DOIs / dicts. The pipeline
+   upserts each queued node in place (dedup match), enriches it, fetches and
+   links its citations, and transitions it to `pipeline:digested` (or
+   `pipeline:needs-review` / `pipeline:failed`).
+
+Inbound/outbound citation linking and dedup are handled inside the pipeline;
+there is no separate citation-expansion or hop-tracking step to run by hand.
 
 #### Phase C — Digestion (process scaffolded nodes)
 1. `trellis find --tag pipeline:scaffolded --json` → get list of scaffolded nodes.
@@ -147,6 +148,112 @@ Runs as part of the autonomous loop. On each cycle:
 
 ---
 
+## Ingestion Pipeline (canonical)
+
+There is **exactly one ingestion pipeline**: `pipeline.ingestion.ingest_batch`.
+Every paper enters the graph through it — manual `trellis add reference` +
+per-node `trellis link` loops are forbidden (they bypass enrichment, dedup, and
+edge-linking and produce stub nodes). RIS files, queued nodes, backfills, and
+single-paper requests all funnel into `ingest_batch`. Do not write a second
+ingestion path; if you need a new source, parse it into the input contract below
+and hand it to `ingest_batch`.
+
+### Input contract
+
+```python
+ingest_batch(items: list[str | dict], workers: int = 8)
+    -> (list[IngestionOutcome], BatchMetrics)
+```
+
+Each element of `items` is either:
+
+- a **string** — a bare DOI (e.g. `"10.1038/nature11234"`); or
+- a **dict** — a full record: `{"title", "doi"?, "pmid"?, "abstract"?,
+  "authors"?, "year"?, "venue"?}`. `authors` may be a list or a `;`-separated
+  string. A dict needs **at least one** of: a DOI, a PMID, or a title of ≥ 10
+  characters (`parse_input` raises otherwise).
+
+Both forms normalize through `parse_input` — there is no separate code path for
+DOI-less records. A dict that carries a DOI still joins the Semantic Scholar
+batch prefetch; a title-only dict skips the prefetch and is enriched per-paper.
+
+### Phase sequence (per batch)
+
+| Phase | Function | What it does |
+|-------|----------|--------------|
+| 0 | `batch_resolve` | One Semantic Scholar batch call resolves all DOIs present in the batch (prefetch). Title-only items contribute nothing here. |
+| — | `build_node_index` | In-memory index of the current graph for O(1) dedup. |
+| 1 | `resolve_and_upsert` | Per item: `parse_input` → `resolve_identity` (enrich) → `find_existing_indexed` (dedup) → `upsert_node` (create or merge) → mark `pipeline:digesting`. |
+| — | `build_node_index` | Rebuild so later phases see nodes created in phase 1. |
+| — | `reverse_materialize` | Link **inbound** citations: existing graph nodes that cite this paper get a `references` edge to it. |
+| — | `build_edge_index` | Snapshot existing edges so linking is idempotent (works around the lack of an edge-uniqueness constraint). |
+| 2 | `fetch_and_store` | Fetch the paper's **outbound** citations and store them on the node (`metadata.reference.outbound_citations`). |
+| 3 | `link_stored` | Materialize `references` edges to every cited target already present in the graph. |
+| 4 | `verify_outcome` | Confirm node exists, citation metadata present, edge count. |
+| 5 | `set_final_pipeline_status` | Set `pipeline:digested` on success, or `pipeline:needs-review` / `pipeline:failed` on classified errors. |
+
+### Enrichment (`resolve_identity`)
+
+Sources are tried in order and merged **only into missing fields** (existing
+values win): **PubMed** (esearch + efetch — supplies MeSH, keywords, publication
+types) → **Semantic Scholar** (`paperId`, fields of study, canonical DOI) →
+**Crossref** (fallback when no title resolved). A title-only record with
+complete basic metadata (title + abstract + authors + year + venue) may skip API
+enrichment entirely. When a PMID is found by *search* (not supplied), the fetched
+title is checked against the known title with a fuzzy ratio ≥ 85 before the
+record is accepted — this rejects PubMed's false matches on DOIs it doesn't index
+(preprints, proceedings).
+
+### Deduplication
+
+`find_existing_indexed` matches against the node index in this precedence:
+**s2_id → doi → pmid → title** (normalized). A match updates the existing node
+in place (merge); no match creates a new node. Dedup spans all pipeline states,
+so a `queued` stub and a re-ingest of the same paper converge on one node.
+
+### Tag derivation (`_make_tags`)
+
+On every upsert, tags are recomputed from the resolved record:
+
+- **Identity / status** (`pipeline:`, `s2id:`, `pmid:`, `year:`) — always
+  dropped and re-derived.
+- **Topical** (`mesh:`, `mesh-major:`, `mesh-q:`, `kw:`, `field:`, `type:`) —
+  dropped and re-derived **only when the resolved record actually carries
+  topical data**. This clears contaminated tags from a prior cross-wired ingest
+  while a sparse re-ingest (e.g. a title-only record whose enrichment was
+  skipped) **preserves** the existing topical tags instead of wiping them.
+- **Structural / provenance** (`source:`, `depth:`, `domain:`, `branch:`, bare
+  custom tags) — always preserved.
+
+### Idempotency invariant
+
+Re-ingesting a paper that already exists must be a **no-op upsert** — never a
+downgrade. Concretely: `store_citations` will not overwrite a non-empty citation
+set with an empty one, and `_make_tags` will not wipe topical tags when the
+re-ingest resolved none. An agent loops ingestion with no cross-session memory,
+so every operation must be safe to repeat.
+
+### Status produced by the pipeline
+
+The pipeline drives a node to `pipeline:digested` once it is **enriched and
+citation-linked**. It does not emit `pipeline:scaffolded`; that status is a
+legacy stub state from the retired single-paper scaffolder. The full-text
+extraction described in *Mode 1, Phase C* (findings / hypotheses / methods) is a
+separate downstream stage and reuses the same status vocabulary — see the note
+in **Trellis Status Tags**.
+
+### Entry points
+
+- **RIS files** — `python scripts/import_ris_network.py <file-or-dir>.ris`
+  parses each record and calls `ingest_batch`. Records without a DOI flow
+  through as title-only dicts. `--dry-run` parses and reports without writing.
+- **Backfill** — `python scripts/backfill.py` re-feeds DOIs of existing nodes
+  (selected by status) through `ingest_batch` to add citation tags and edges
+  that older stub nodes never had.
+- **Programmatic** — `from pipeline.ingestion import ingest_batch`.
+
+---
+
 ## Trellis Node Types
 
 | Type | Purpose |
@@ -177,6 +284,17 @@ Status is stored as a tag on each node. Valid values:
 | `pipeline:failed` | Ingestion or digestion failed. |
 
 A node must have exactly one `pipeline:*` tag at any time. When transitioning, remove the old tag and apply the new one via `trellis update <slug> --tags`.
+
+**Pipeline vs. full-text digestion.** The canonical ingestion pipeline
+(`ingest_batch`) drives a node straight to `pipeline:digested` once it is
+**enriched and citation-linked** — it never emits `pipeline:scaffolded` (that
+status belonged to the retired stub scaffolder). The *Mode 1, Phase C* full-text
+extraction stage (findings / hypotheses / methods from the PDF) is a distinct,
+later stage that reuses this same vocabulary. The two meanings of `digested`
+(enrichment-complete vs. full-text-extracted) currently overlap; treat a
+pipeline-produced `digested` node as enriched-and-linked, and gate full-text
+extraction on the presence of `vault/<slug>/full_text.md` rather than on the tag
+alone.
 
 Trellis native `status` field (`draft`, `in_progress`, `completed`, `archived`) is separate from pipeline state tags.
 
