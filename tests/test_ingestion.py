@@ -1648,3 +1648,70 @@ class TestIngestionIntegration:
 
         after = ingestion.trellis.find_nodes(tag="pipeline:queued")
         assert len(after) == len(before)
+
+
+@pytest.mark.integration
+class TestRisPipelineIntegration:
+    def test_ingest_batch_accepts_dict_input_end_to_end(self, ephemeral_trellis):
+        # The list[str | dict] contract: a dict record flows through the same
+        # single pipeline as a bare DOI and reaches pipeline:digested.
+        outcomes, _ = ingestion.ingest_batch([{"doi": "10.1073/pnas.2304441120"}])
+        outcome = outcomes[0]
+        assert outcome.errors == []
+        assert outcome.upsert.created is True
+        assert outcome.verify.node_exists is True
+        # verify (phase 4) captures the in-flight status; the final status is set
+        # in phase 5, so read it from the node itself.
+        node = ingestion.trellis.get_node(outcome.upsert.slug)
+        status = [t for t in node.get("tags", []) if str(t).startswith("pipeline:")]
+        assert "pipeline:digested" in status
+
+    def test_title_only_reingest_does_not_wipe_enrichment(self, ephemeral_trellis):
+        # Regression guard (idempotency A+B). Re-ingesting an already-enriched
+        # node as a metadata-complete title-only record exercises the exact path
+        # that once wiped a node: enrichment is skipped, so the resolved record
+        # carries no topical data and no DOI. The guards must preserve the
+        # existing topical tags (_make_tags) and stored citations
+        # (store_citations) instead of clearing them.
+        doi = "10.1038/s41564-023-01464-1"
+        first, _ = ingestion.ingest_batch([doi])
+        assert first[0].errors == []
+        slug = first[0].upsert.slug
+
+        node = ingestion.trellis.get_node(slug)
+        ref = (node.get("metadata") or {}).get("reference") or {}
+        topical_before = sorted(
+            t
+            for t in node.get("tags", [])
+            if str(t).split(":")[0] in ("mesh", "kw", "field", "type")
+        )
+        cites_before = (ref.get("outbound_citations") or {}).get("items") or []
+        assert topical_before, "DOI ingest should have produced topical tags"
+        assert cites_before, "DOI ingest should have stored citations"
+
+        # Metadata-complete title-only record (title + abstract + authors + year
+        # + venue) → resolve_identity short-circuits API enrichment, the path
+        # that produced the regression.
+        reingest = {
+            "title": node.get("title"),
+            "abstract": node.get("abstract"),
+            "authors": ref.get("authors"),
+            "year": ref.get("year"),
+            "venue": ref.get("venue"),
+        }
+        second, _ = ingestion.ingest_batch([reingest])
+        assert second[0].errors == []
+        # Deduped onto the same node — no duplicate created. A dedup match
+        # returns the node's UUID, so resolve it back to confirm same identity.
+        assert second[0].upsert.created is False
+        node2 = ingestion.trellis.get_node(second[0].upsert.slug)
+        assert ingestion._node_slug(node2) == slug
+        ref2 = (node2.get("metadata") or {}).get("reference") or {}
+        topical_after = sorted(
+            t
+            for t in node2.get("tags", [])
+            if str(t).split(":")[0] in ("mesh", "kw", "field", "type")
+        )
+        cites_after = (ref2.get("outbound_citations") or {}).get("items") or []
+        assert topical_after == topical_before  # guard B: topical tags preserved
+        assert len(cites_after) == len(cites_before)  # guard A: citations preserved
