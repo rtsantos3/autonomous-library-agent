@@ -226,17 +226,15 @@ library.ris -> ris_adapter -> normalized refs -> ingest_batch -> Trellis nodes +
 
 **What already exists.** `scripts/import_ris_network.py:parse_ris_text` is a
 working RIS parser (tag regex, `ER` record flush, continuation lines, full field
-mapping: T1/TI, AB/N2, DO/M3, PY/Y1/DA, JO/T2/J2, AU, KW, UR). It currently
-feeds the *old* scaffold lineage (`scripts/ingest.py`), not the new
-`pipeline/ingestion.py` state machine.
+mapping: T1/TI, AB/N2, DO/M3, PY/Y1/DA, JO/T2/J2, AU, KW, UR). It now feeds
+the unified `pipeline/ingestion.py:ingest_batch` state machine directly.
 
-**Work to do (refactor, engine unchanged).**
-- Lift `parse_ris_text` into a first-class input adapter under `pipeline/` that
-  emits normalized reference dicts consumed by `ingest_batch`.
-- Collapse the two lineages so RIS records get a first-class path to
-  `pipeline:digested` instead of stopping at `scaffolded`.
-- Map RIS `TY` types (`JOUR`, `BOOK`, `CHAP`, `CONF`, ...) to the canonical
-  `type:*` slugs via the same `pub_type_slug` / `canonical_type_tag` path.
+**Work already done.**
+- `parse_ris_text` feeds normalized reference dicts into `ingest_batch`.
+- Unified ingestion: RIS records go directly to `pipeline:digested` (no scaffolded
+  intermediate).
+- RIS `TY` types (`JOUR`, `BOOK`, `CHAP`, `CONF`, ...) map to canonical
+  `type:*` slugs via `pub_type_slug` / `canonical_type_tag`.
 
 **Open design points.**
 - *DOI-keying gap.* The pipeline resolves/enriches by DOI; RIS from reference
