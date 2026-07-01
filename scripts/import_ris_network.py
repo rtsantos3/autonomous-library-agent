@@ -35,7 +35,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from pipeline.ingestion import ingest_batch  # noqa: E402
+from pipeline.ingestion import _classify_failure, ingest_batch  # noqa: E402
 from pipeline.trellis import _workspace  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -197,11 +197,7 @@ def collect_ris_files(root: Path) -> list[Path]:
 
 
 def _outcome_status(outcome) -> str:
-    if outcome.errors:
-        return "error"
-    if outcome.verify and outcome.verify.pipeline_status:
-        return outcome.verify.pipeline_status
-    return "unknown"
+    return _classify_failure(outcome.errors) if outcome.errors else "digested"
 
 
 def main() -> int:
