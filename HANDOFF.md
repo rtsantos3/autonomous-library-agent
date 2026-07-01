@@ -13,7 +13,7 @@ An autonomous microbiome research agent that ingests, digests, and queries acade
 - `prompts/verify.md` — LLM verification template (three-way: confirmed/uncertain/rejected)
 - `prompts/research_report.md` — Telegram summary template
 - `pipeline/trellis.py` — Python CLI wrapper (EXISTS but NOT NEEDED — agent uses CLI/API directly)
-- `pipeline/ingest.py` — metadata fetcher (EXISTS but NOT NEEDED — agent uses Paper Search MCP instead)
+- `pipeline/ingestion.py` — single unified ingestion pipeline (ACTIVE — parses RIS and batch-ingests into Trellis)
 - `seed.py` — seeds EndNote library into Trellis
 - `.env` — NCBI API key configured
 - `docs/journal_log.md` — full architecture documentation
@@ -80,9 +80,9 @@ autonomous_library_agent/
     extract.md
     verify.md
     research_report.md
-  pipeline/              # Exists but mostly unused — agent uses MCP + CLI directly
+  pipeline/              # Unified RIS→Trellis ingestion pipeline
     trellis.py
-    ingest.py
+    ingestion.py
   vault/                 # Empty, will hold per-slug extracted content
   docs/
     journal_log.md
