@@ -1601,6 +1601,39 @@ class TestIdempotencyGuards:
         update.assert_not_called()
         assert result.stored == 2
 
+    def test_title_only_record_always_runs_enrichment(self):
+        # FOLLOW-UP #2: Title-only records should ALWAYS run enrichment even if
+        # they have all basic metadata fields (title, abstract, authors, year, venue).
+        # This ensures we attempt to resolve a DOI/locator via S2/PubMed/Crossref.
+        with patch(
+            "pipeline.ingestion._fill_from_pubmed", return_value="input-only"
+        ) as fill_pubmed, patch(
+            "pipeline.ingestion._fill_from_s2", return_value="semantic-scholar"
+        ) as fill_s2, patch(
+            "pipeline.ingestion._fill_from_crossref", return_value="crossref"
+        ) as fill_crossref:
+            parsed = ingestion.parse_input(
+                {
+                    "title": "A title-only paper with sufficient metadata",
+                    "abstract": "Abstract text here",
+                    "authors": ["Author A", "Author B"],
+                    "year": "2024",
+                    "venue": "Journal Name",
+                }
+            )
+            # Verify resolve_identity calls all enrichment functions (not short-circuit)
+            result = ingestion.resolve_identity(parsed)
+            assert fill_pubmed.called, "PubMed enrichment should be called"
+            assert fill_s2.called, "S2 enrichment should be called"
+            assert fill_crossref.called, "Crossref enrichment should be called"
+            assert result.title  # title-only record resolves a title
+
+    def test_classify_failure_marks_locator_as_needs_review(self):
+        # FOLLOW-UP #2: Records that never resolve a locator should be
+        # classified as needs-review, not hard failure.
+        status = ingestion._classify_failure(["Could not resolve a locator"])
+        assert status == "needs-review"
+
 
 @pytest.mark.integration
 class TestIngestionIntegration:
@@ -1725,3 +1758,32 @@ class TestRisPipelineIntegration:
         cites_after = (ref2.get("outbound_citations") or {}).get("items") or []
         assert topical_after == topical_before  # guard B: topical tags preserved
         assert len(cites_after) == len(cites_before)  # guard A: citations preserved
+
+    def test_intra_batch_dedup_prevents_duplicate_nodes(self, ephemeral_trellis):
+        # FOLLOW-UP #3: two identical NEW records in a single ingest_batch call
+        # must create exactly ONE node. Without the live-index + lock, both records
+        # miss the frozen snapshot and each create a node (the race this closes).
+        # A locator (DOI) is required for Trellis to accept the create; the DOI is
+        # deliberately unresolvable so the test does not depend on live enrichment.
+        title = "Intra Batch Dedup Sentinel Paper On Gut Microbiota"
+        record = {"doi": "10.9999/intra-batch-dedup-sentinel", "title": title}
+        outcomes, _ = ingestion.ingest_batch([dict(record), dict(record)])
+
+        assert len(outcomes) == 2
+        assert outcomes[0].errors == []
+        assert outcomes[1].errors == []
+        # Exactly one create; the second record dedups onto the first.
+        created = [o.upsert.created for o in outcomes]
+        assert created.count(True) == 1
+        assert created.count(False) == 1
+        # Both outcomes resolve to the same underlying node. upsert.slug is a human
+        # slug on create but a UUID on dedup-match, so compare the canonical node id
+        # rather than the raw identifier strings.
+        node_ids = {
+            ingestion.trellis.get_node(o.upsert.slug).get("id") for o in outcomes
+        }
+        assert len(node_ids) == 1
+
+        # The graph holds exactly one node for this DOI-bearing title.
+        matches = ingestion.trellis.find_nodes(text=title)
+        assert len([n for n in matches if n.get("title") == title]) == 1

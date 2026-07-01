@@ -40,6 +40,7 @@ from pipeline._utils import (
     slugify,
 )
 from pipeline.citations import CitationResult, fetch_outbound_citations
+from pipeline.trellis import _doi_key, _norm_title
 
 if TYPE_CHECKING:
     from pipeline.aggregator import BatchResolved
@@ -187,6 +188,7 @@ def _classify_failure(errors: list[str]) -> str:
         "invalid doi",
         "malformed",
         "no doi",
+        "locator",
     )
     for error in errors:
         text = str(error).lower()
@@ -690,15 +692,6 @@ def resolve_identity(
         "mesh_major": [],
         "mesh_qualifiers": [],
     }
-    has_sufficient_title_only_metadata = (
-        parsed.title
-        and not parsed.doi
-        and not parsed.pmid
-        and parsed.abstract
-        and parsed.authors
-        and parsed.year
-        and parsed.venue
-    )
 
     if prefetched is not None:
         fields.update(
@@ -779,14 +772,14 @@ def resolve_identity(
             not _blank_to_none(fields.get("abstract")),
         ]
     )
-    if not has_sufficient_title_only_metadata and (
+    if (
         prefetched is None
         or not _blank_to_none(fields.get("title"))
         or needs_enrichment
     ):
         fields["source"] = _fill_from_pubmed(parsed, fields)
         fields["source"] = _fill_from_s2(fields)
-        if not _blank_to_none(fields.get("title")):
+        if not parsed.doi or not _blank_to_none(fields.get("title")):
             fields["source"] = _fill_from_crossref(fields)
 
     title = _blank_to_none(fields.get("title"))
@@ -853,29 +846,57 @@ def find_existing_indexed(resolved: ResolveResult, index: dict) -> DedupResult:
     return DedupResult(None, None)
 
 
-def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
-    metadata = {"reference": _reference_metadata(resolved)}
-    tags = _make_tags(resolved)
-    citation = _citation_string(resolved)
-    today = date.today().isoformat()
+def _create_node(resolved: ResolveResult, metadata: dict, tags: list[str]) -> dict:
+    """
+    Create a new reference node in Trellis. Helper factored from upsert_node
+    to support intra-batch dedup via live index.
+    """
+    node = trellis.add_reference(
+        resolved.title,
+        uri=_canonical_doi_uri(resolved.doi),
+        abstract=resolved.abstract,
+        citation=_citation_string(resolved),
+        metadata=metadata,
+        tags=tags,
+    )
+    return node
 
-    if dedup.existing_node is None:
-        node = trellis.add_reference(
-            resolved.title,
-            uri=_canonical_doi_uri(resolved.doi),
-            abstract=resolved.abstract,
-            citation=citation,
-            metadata=metadata,
-            tags=tags,
-        )
-        slug = _node_slug(node)
-        if not slug:
-            raise RuntimeError("Trellis add did not return a slug")
-        trellis.annotate_node(
-            slug, f"[{today}] Created via ingestion pipeline; source: {resolved.source}"
-        )
-        return UpsertResult(slug=slug, created=True)
 
+def _register_node_index(index: dict, resolved: ResolveResult, node: dict) -> None:
+    """
+    Register a newly-created node into the live in-memory index by s2_id,
+    doi (including alt_dois), pmid, and normalized title (10+ chars).
+    """
+    if resolved.s2_id:
+        index.setdefault("by_s2id", {})[resolved.s2_id] = node
+    if resolved.doi:
+        doi_key = _doi_key(resolved.doi)
+        if doi_key:
+            index.setdefault("by_doi", {})[doi_key] = node
+    for alt_doi in resolved.alt_dois or []:
+        doi_key = _doi_key(alt_doi)
+        if doi_key:
+            index.setdefault("by_doi", {})[doi_key] = node
+    if resolved.pmid:
+        index.setdefault("by_pmid", {})[str(resolved.pmid)] = node
+    title = _norm_title(resolved.title)
+    if title and len(title) >= 10:
+        index.setdefault("by_title", {})[title] = node
+
+
+def _merge_into_existing(
+    resolved: ResolveResult,
+    dedup: DedupResult,
+    metadata: dict,
+    citation: str,
+    today: str,
+) -> UpsertResult:
+    """
+    Merge a resolved record into an already-existing node (dedup match): fill
+    missing reference metadata, re-derive tags (guard B preserves topical tags
+    on sparse re-ingests), and annotate. Shared by the snapshot-dedup path and
+    the in-lock recheck path so the two cannot drift.
+    """
     slug_or_id = (
         dedup.existing_node.get("id")
         or dedup.existing_node.get("uuid")
@@ -904,6 +925,51 @@ def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
         ),
     )
     return UpsertResult(slug=slug_or_id, created=False)
+
+
+def upsert_node(
+    resolved: ResolveResult,
+    dedup: DedupResult,
+    index: Optional[dict] = None,
+    node_lock: Optional[threading.Lock] = None,
+) -> UpsertResult:
+    metadata = {"reference": _reference_metadata(resolved)}
+    tags = _make_tags(resolved)
+    citation = _citation_string(resolved)
+    today = date.today().isoformat()
+
+    if dedup.existing_node is None:
+        # When both index and lock are provided, re-check against the LIVE index
+        # while holding the lock to close the race between find_existing_indexed
+        # and node creation. This prevents duplicate nodes from identical records
+        # in the same batch. Unlike the edge index (a set of keys reserved before
+        # the write in link_nodes), a node's index entry is the node dict itself
+        # (slug/tags/metadata) — a placeholder reservation would hand a waiter an
+        # incomplete node, so we hold the lock across the create instead. The cost
+        # is bounded: add_reference writes to local SQLite (which serializes writes
+        # regardless), and the expensive network resolve already ran in parallel.
+        if index is not None and node_lock is not None:
+            with node_lock:
+                dedup_recheck = find_existing_indexed(resolved, index)
+                if dedup_recheck.existing_node is not None:
+                    return _merge_into_existing(
+                        resolved, dedup_recheck, metadata, citation, today
+                    )
+                # Still no match: create the node and register it before releasing.
+                node = _create_node(resolved, metadata, tags)
+                _register_node_index(index, resolved, node)
+        else:
+            node = _create_node(resolved, metadata, tags)
+
+        slug = _node_slug(node)
+        if not slug:
+            raise RuntimeError("Trellis add did not return a slug")
+        trellis.annotate_node(
+            slug, f"[{today}] Created via ingestion pipeline; source: {resolved.source}"
+        )
+        return UpsertResult(slug=slug, created=True)
+
+    return _merge_into_existing(resolved, dedup, metadata, citation, today)
 
 
 def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult:
@@ -1099,6 +1165,7 @@ def resolve_and_upsert(
     upsert_timings: list[float],
     timing_lock: threading.Lock,
     index: dict,
+    node_lock: Optional[threading.Lock] = None,
 ) -> Optional[tuple[int, str, str]]:
     idx, raw_item = item
     outcome = outcomes[idx]
@@ -1112,7 +1179,9 @@ def resolve_and_upsert(
         resolve_elapsed = time.perf_counter() - t0
         outcome.dedup = find_existing_indexed(outcome.resolve, index)
         t0 = time.perf_counter()
-        outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
+        outcome.upsert = upsert_node(
+            outcome.resolve, outcome.dedup, index=index, node_lock=node_lock
+        )
         upsert_elapsed = time.perf_counter() - t0
         with timing_lock:
             resolve_timings.append(resolve_elapsed)
@@ -1399,6 +1468,7 @@ def ingest_batch(
     resolve_timings: list[float] = []
     upsert_timings: list[float] = []
     timing_lock = threading.Lock()
+    node_lock = threading.Lock()
 
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1412,6 +1482,7 @@ def ingest_batch(
                     upsert_timings,
                     timing_lock,
                     index,
+                    node_lock,
                 ),
                 enumerate(items),
             )

@@ -102,7 +102,9 @@ class TestBatchWorkers:
         assert upsert_timings[0] >= 0
         resolve.assert_called_once_with(outcomes[0].parse, prefetched=fetched)
         dedup.assert_called_once_with(outcomes[0].resolve, index)
-        upsert.assert_called_once_with(outcomes[0].resolve, outcomes[0].dedup)
+        upsert.assert_called_once_with(
+            outcomes[0].resolve, outcomes[0].dedup, index=index, node_lock=None
+        )
 
     def test_resolve_and_upsert_catches_exception(self):
         outcomes = [IngestionOutcome()]
@@ -327,7 +329,7 @@ class TestIngestBatch:
                 source="s2-batch",
             )
 
-        def upsert_node(resolve, dedup):
+        def upsert_node(resolve, dedup, **kwargs):
             if resolve.doi == "10.1/b":
                 raise RuntimeError("upsert failed for b")
             return UpsertResult(f"slug-{resolve.doi[-1]}", True)
@@ -577,7 +579,9 @@ class TestBatchItemNormalization:
             return_value=DedupResult(None, None),
         ), patch(
             "pipeline.ingestion.upsert_node",
-            side_effect=lambda r, d: UpsertResult(f"slug-{r.title[:3]}", True),
+            side_effect=lambda r, d, **kwargs: UpsertResult(
+                f"slug-{r.title[:3]}", True
+            ),
         ), patch(
             "pipeline.ingestion.store_citations",
             return_value=ingestion.CitationStoreResult(0),
