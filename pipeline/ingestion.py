@@ -1337,6 +1337,27 @@ def _doi_from_node(node: dict) -> Optional[str]:
     return None
 
 
+def _record_from_node(node: dict) -> dict:
+    """
+    Reconstruct a parse_input-shaped record from a stored node, so a DOI-less
+    node (e.g. a legacy title-only scaffold stub) can be re-fed through
+    ingest_batch's dict path instead of being dropped for lack of a DOI. Title
+    and abstract live at the node top level; the rest is in metadata.reference.
+    """
+    reference = (node.get("metadata") or {}).get("reference") or {}
+    if not isinstance(reference, dict):
+        reference = {}
+    return {
+        "title": node.get("title"),
+        "doi": _doi_from_node(node),
+        "pmid": reference.get("pmid"),
+        "abstract": node.get("abstract"),
+        "authors": reference.get("authors") or [],
+        "year": reference.get("year"),
+        "venue": reference.get("venue"),
+    }
+
+
 def backfill_nodes(
     workers: int = 8,
     only_missing: bool = False,
@@ -1345,11 +1366,14 @@ def backfill_nodes(
 ) -> tuple[list[IngestionOutcome], BackfillResult]:
     """
     Full re-scan of existing entries through the SAME pipeline used for new
-    instantiation. Each existing node already carries its DOI, so feeding those
-    DOIs through ingest_batch updates the nodes in place via upsert_node's
-    dedup-merge path (an upsert: existing -> update, missing -> insert; no
-    duplicates) while building the citation tags AND edges that older scaffold
-    runs never produced.
+    instantiation. DOI-bearing nodes are re-fed as bare DOI strings; DOI-less
+    nodes (e.g. legacy title-only scaffold stubs) are re-fed as dict records via
+    ingest_batch's str|dict contract, so the pipeline can resolve a locator from
+    the title instead of dropping them. Either way ingest_batch updates the node
+    in place through upsert_node's dedup-merge path (existing -> update, missing
+    -> insert; no duplicates) while building the citation tags AND edges that
+    older scaffold runs never produced. A node is skipped only when it has no
+    DOI, PMID, or title of at least 10 characters to resolve on.
 
     only_missing=True is an optional optimization that skips nodes already
     carrying topical tags; the default (False) reprocesses every entry, which is
@@ -1379,19 +1403,29 @@ def backfill_nodes(
         skipped_already_tagged=0,
     )
 
-    dois: list[str] = []
+    items: list["str | dict"] = []
     for node in candidates:
         if only_missing and _has_topical_backfill_tags(node):
             result.skipped_already_tagged += 1
             continue
         doi = _doi_from_node(node)
-        if not doi:
+        if doi:
+            # DOI-bearing: feed the bare DOI string so it joins the batch prefetch.
+            items.append(doi)
+            continue
+        # No DOI: re-feed the stored record as a dict so ingest_batch's dict path
+        # can resolve a locator from the title (S2/PubMed/Crossref) instead of
+        # dropping the node. Skip only when there is nothing to resolve on.
+        record = _record_from_node(node)
+        try:
+            parse_input(record)
+        except ValueError:
             result.skipped_no_doi += 1
             continue
-        dois.append(doi)
+        items.append(record)
 
-    result.resolvable = len(dois)
-    if not dois:
+    result.resolvable = len(items)
+    if not items:
         return [], result
 
     if chunk_size <= 0:
@@ -1402,8 +1436,8 @@ def backfill_nodes(
     # dedup-merge upsert -> fetch citations -> link edges -> verify -> status.
     # Each chunk builds its own index inside ingest_batch so later chunks can see
     # nodes and edges created by earlier chunks.
-    for start in range(0, len(dois), chunk_size):
-        chunk = dois[start : start + chunk_size]
+    for start in range(0, len(items), chunk_size):
+        chunk = items[start : start + chunk_size]
         outcomes, _metrics = ingest_batch(chunk, workers=workers)
         all_outcomes.extend(outcomes)
         for outcome in outcomes:
