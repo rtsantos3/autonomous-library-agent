@@ -1,7 +1,7 @@
 # autonomous-library-agent
 
 A literature **ingestion pipeline** and **persistent-agent contract** that build and
-maintain a research library as a [Trellis](https://github.com/rtsantos3/trellis-app)
+maintain a research library as a [Trellis](https://github.com/rtsantos3/Trellis)
 knowledge graph: every paper is a node, every citation is an edge. The pipeline is
 **library-agnostic** — one agent can serve many libraries; each library is just a
 workspace directory the agent is pointed at.
@@ -45,6 +45,23 @@ scripts/
 
 The pipeline **shells out to the `trellis` CLI** for all graph writes; Trellis (a
 local SQLite-backed knowledge graph) is an external dependency, not vendored here.
+
+### Trellis dependency
+
+Trellis is distributed as the npm package
+[`@rtsantos3/trellis-app`](https://www.npmjs.com/package/@rtsantos3/trellis-app)
+(source: [`github.com/rtsantos3/Trellis`](https://github.com/rtsantos3/Trellis)).
+It bundles a Python (Click) CLI behind a Node launcher, so the `trellis` command
+must be on your `PATH` before this pipeline can write to a graph:
+
+```bash
+npm install -g @rtsantos3/trellis-app
+trellis --version        # sanity check
+```
+
+`setup.sh` verifies the `trellis` CLI is present but does not install it — install
+the npm package first. The pipeline is pinned to the CLI surface of Trellis
+`0.16.x`.
 
 ### Workspace resolution
 
