@@ -1,14 +1,37 @@
 # autonomous-library-agent
 
-A literature **ingestion pipeline** and **persistent-agent contract** that build and
-maintain a research library as a [Trellis](https://github.com/rtsantos3/Trellis)
-knowledge graph: every paper is a node, every citation is an edge. The pipeline is
-**library-agnostic** — one agent can serve many libraries; each library is just a
-workspace directory the agent is pointed at.
+**What this is:** a tool that turns your collection of papers into a searchable,
+connected knowledge base you can ask research questions against. Point it at a list
+of papers — DOIs, PMIDs, or an EndNote/RIS export — and it looks each one up, fills
+in the details (abstract, authors, journal, topics), removes duplicates, and links
+the papers together by their citations. The result is a map of the literature you've
+collected that you (or an AI assistant) can later query.
 
-This repository is the *tooling*. The *data* (a materialized graph) lives in a
+Under the hood it is a literature **ingestion pipeline** plus a **persistent-agent
+contract** that maintain the library as a
+[Trellis](https://github.com/rtsantos3/Trellis) knowledge graph — every paper is a
+*node*, every citation is an *edge*. It is built to seed an offline **RAG** corpus
+(retrieval-augmented generation: an AI that answers from *your* papers rather than
+from guesswork). It is **library-agnostic** — it works for any collection, and a
+library is just a folder the tool is pointed at — resolves and enriches each paper
+across Semantic Scholar, PubMed, and Crossref, and is **idempotent**: safe for an
+autonomous agent to re-run unattended without ever creating duplicates.
+
+This repository is the **tooling**. The **data** (a materialized graph) lives in a
 separate library repository that includes this one as a submodule — see
 [`rtsantos3/LAD_library`](https://github.com/rtsantos3/LAD_library) for an example.
+
+**New here?** First install the Trellis CLI — it ships as an npm package and that
+is the main download route:
+
+```bash
+npm install -g @rtsantos3/trellis-app     # provides the `trellis` command on PATH
+```
+
+Then run `./setup.sh` (see [Setup](#setup)) to get a working environment and
+hydrate a graph, read [`AGENT-CONTRACT.md`](AGENT-CONTRACT.md) for the agent-facing
+runtime contract, and see the [Ingestion pipeline](#ingestion-pipeline) map below
+for how a paper flows through end to end.
 
 ## What it does
 
