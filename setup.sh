@@ -5,7 +5,7 @@
 # Idempotent and safe to re-run: it will NOT recreate an existing conda env and
 # will NOT overwrite an existing .env. Steps:
 #   1. verify conda is available
-#   2. create the ./setup prefix env from environment.yml (only if absent)
+#   2. create the named conda env 'autonomous-library-agent' from environment.yml (only if absent)
 #   3. create .env from .env.example (only if absent)
 #   4. verify the `trellis` CLI is on PATH (verify-only; does not install it)
 #   5. report the resolved Trellis workspace and whether it is initialized
