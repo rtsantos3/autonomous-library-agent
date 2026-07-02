@@ -116,10 +116,13 @@ Sleep 5 minutes. Repeat from Phase B.
 Respond to user research questions against the Trellis graph.
 
 1. Parse the query. Identify relevant concepts, methods, or paper titles.
-2. Search the graph: `trellis find --text <query> --json`. Supplement with `--tag` filters where appropriate.
-3. For each relevant `reference` node with `pipeline:digested`, retrieve full text or extracted sections from `vault/<slug>/`.
-4. Synthesize an answer. Every factual claim must cite the source Trellis node slug (e.g., `[gut-microbiota-obesity-2023]`).
-5. If the query implicates literature not present in the graph, say so explicitly and offer to ingest it. Do not fabricate citations.
+2. **Find the seed nodes** — `trellis find --text <query> --json`, supplemented with `--tag` filters (or `trellis grep <pattern> --json` for exact substring/regex hits).
+3. **Read the graph structure**, don't stop at flat find — the graph is built to be traversed:
+   - *Neighborhood* (RAG seed): `trellis subgraph <slug> --mode edges --depth 2 --json` pulls the citation neighborhood of a seed paper so the answer is grounded in what it cites and what cites it.
+   - *Connection*: `trellis path <slug-a> <slug-b> --json` shows how two papers relate (shared citations, chains). Use it when the query is comparative ("how does X relate to Y?").
+4. For each relevant `reference` node with `pipeline:digested`, retrieve full text or extracted sections from `vault/<slug>/`.
+5. Synthesize an answer. Every factual claim must cite the source Trellis node slug (e.g., `[gut-microbiota-obesity-2023]`).
+6. If the query implicates literature not present in the graph, say so explicitly and offer to ingest it. Do not fabricate citations.
 
 ### Mode 3: Research Command
 
@@ -303,8 +306,21 @@ Trellis native `status` field (`draft`, `in_progress`, `completed`, `archived`) 
 ## Trellis CLI Reference
 
 ```bash
-# Find nodes by text or tag
+# Find nodes by text or tag (flat search — no graph structure)
 trellis find --text <query> --tag <tag> --json
+
+# Grep node/edge/annotation records by pattern (literal or --regex)
+trellis grep <pattern> --scope node --json
+
+# Neighborhood: the subgraph around a node (the RAG-seed primitive).
+# --mode hierarchy walks parent/child; --mode edges walks citation edges.
+trellis subgraph <slug> --mode edges --direction outgoing --depth 2 --json
+trellis subgraph <slug> --path out.jsonl        # dump neighborhood to JSONL
+
+# Connection: shortest path between two nodes (or a waypoint chain).
+# This is how the agent answers "how are these two papers related?".
+trellis path <slug-a> <slug-b> --direction both --json
+trellis path <slug-a> <slug-b> --relationship references --max-depth 6 --summary
 
 # Add a new paper node (reference type, always under the project)
 trellis add reference "<title>" --description "<abstract>" --uri "https://doi.org/<doi>" --tags "<tag1>,<tag2>" --parent microbiome-research-library --actor-id daedalus --json

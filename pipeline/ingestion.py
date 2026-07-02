@@ -1,15 +1,20 @@
 """
-ingestion.py - Single-reference ingestion pipeline orchestrator.
+ingestion.py - The single ingestion pipeline: ``ingest_batch``.
 
-Phases:
-  1. parse_input        - normalize raw input dict
-  2. resolve_identity   - fill missing metadata from PubMed / S2
-  3. find_existing      - dedup check in Trellis
-  4. upsert_node        - create or merge-update reference node
-  5. fetch_citations    - retrieve outbound citations from S2
-  6. store_citations    - read-merge-write citation metadata onto node
-  7. link_citations     - materialize edges for already-present targets
-  8. verify_outcome     - confirm Trellis state post-run
+``ingest_batch(list[str | dict])`` is the ONE entry point that creates,
+enriches, and links reference nodes. A str item is a bare DOI; a dict is a full
+record (title-only allowed). RIS import, backfill, and the CLI all funnel here;
+nothing hand-rolls a second path.
+
+Per-item work (run across the batch phases):
+  1. parse_input            - normalize a str|dict item
+  2. resolve_identity       - fill missing metadata from PubMed / S2 / Crossref
+  3. find_existing_indexed  - dedup against the in-memory node index
+  4. upsert_node            - create, or merge-update, the reference node
+  5. store_citations        - read-merge-write outbound citations onto the node
+  6. link_citations         - materialize edges for already-present targets
+  7. verify_outcome         - confirm Trellis state post-run
+  8. set_final_pipeline_status - queued/digesting -> digested | needs-review | failed
 
 LLM-independent. No description field written. No stub nodes created.
 """
@@ -806,26 +811,6 @@ def resolve_identity(
     )
 
 
-def find_existing(resolved: ResolveResult) -> DedupResult:
-    if resolved.s2_id:
-        node = trellis.find_by_s2id(resolved.s2_id)
-        if node:
-            return DedupResult(node, "s2_id")
-    if resolved.doi:
-        node = trellis.find_by_doi(resolved.doi)
-        if node:
-            return DedupResult(node, "doi")
-    if resolved.pmid:
-        node = trellis.find_by_pmid(resolved.pmid)
-        if node:
-            return DedupResult(node, "pmid")
-    if resolved.title:
-        node = trellis.find_by_title(resolved.title)
-        if node:
-            return DedupResult(node, "title")
-    return DedupResult(None, None)
-
-
 def find_existing_indexed(resolved: ResolveResult, index: dict) -> DedupResult:
     if resolved.s2_id:
         node = trellis.dedup_check_indexed(index, s2id=resolved.s2_id)
@@ -1087,33 +1072,6 @@ def verify_outcome(slug: str, edge_count: int = 0) -> VerifyResult:
             pipeline_status=None,
             edge_count=0,
         )
-
-
-def ingest_reference_pipeline(raw: dict, prefetched=None) -> IngestionOutcome:
-    outcome = IngestionOutcome()
-    try:
-        outcome.parse = parse_input(raw)
-        outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched)
-        outcome.dedup = find_existing(outcome.resolve)
-        outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
-        if prefetched is not None and prefetched.citations:
-            citations = CitationResult(
-                source="s2-batch",
-                retrieved_at=date.today().isoformat(),
-                items=prefetched.citations,
-            )
-        else:
-            citations = fetch_outbound_citations(outcome.resolve.doi or "")
-        outcome.citation_store = store_citations(outcome.upsert.slug, citations)
-        index = trellis.build_node_index()
-        outcome.link = link_citations(outcome.upsert.slug, citations, index=index)
-        outcome.verify = verify_outcome(
-            outcome.upsert.slug,
-            edge_count=(outcome.link.linked if outcome.link else 0),
-        )
-    except (ValueError, RuntimeError) as e:
-        outcome.errors.append(str(e))
-    return outcome
 
 
 def format_metrics_table(metrics: BatchMetrics) -> str:
@@ -1662,5 +1620,6 @@ if __name__ == "__main__":
     }
     if not raw:
         parser.error("Provide at least one of --doi, --pmid, --title")
-    outcome = ingest_reference_pipeline(raw)
-    print(json.dumps(dataclasses.asdict(outcome), indent=2, default=str))
+    # A single reference is just a one-item batch through the one pipeline.
+    outcomes, _metrics = ingest_batch([raw])
+    print(json.dumps(dataclasses.asdict(outcomes[0]), indent=2, default=str))

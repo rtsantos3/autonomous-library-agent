@@ -67,29 +67,56 @@ There is **one** ingestion pipeline: `pipeline.ingestion.ingest_batch`. RIS
 import, backfill, and single-paper requests all feed it — nothing creates nodes
 by hand-rolling `trellis add`/`link`.
 
+```
+ ENTRYPOINTS (every path that ingests a paper)
+ ─────────────────────────────────────────────
+  scripts/import_ris_network.py   parse RIS ─┐
+  scripts/backfill.py → backfill_nodes ──────┤  (bare DOI str ── or ── full record dict)
+  pipeline/ingestion.py  --doi/--pmid/--title┤
+  scripts/benchmarks/* ──────────────────────┤
+                                             ▼
+             ╔═══════════════════════════════════════════════╗
+             ║        ingest_batch(list[str | dict])         ║   ◄── THE ONE PIPELINE
+             ╚═══════════════════════════════════════════════╝
+                                             │
+   phase 0 │ batch_resolve ................. one S2 batch call for every DOI in the set
+           │ build_node_index ............. snapshot the graph into an in-memory index
+           ▼
+   phase 1 │ resolve_and_upsert (parallel, per item):
+           │     parse_input .............. normalize str|dict
+           │     resolve_identity ......... enrich: PubMed → S2 → Crossref (fill missing)
+           │     find_existing_indexed .... dedup: s2_id ▸ doi ▸ pmid ▸ title
+           │     upsert_node .............. create (index+lock) │ or merge into existing
+           ▼
+   phase 1½│ reverse_materialize .......... link papers already in graph that cite this one
+           │ build_edge_index ............. snapshot edges (dedupe guard)
+           ▼
+   phase 2 │ fetch_and_store → store_citations .. fetch outbound cites, write onto node
+           ▼
+   phase 3 │ link_stored → link_citations ...... edges to targets already present
+           ▼
+   phase 4 │ verify_upserted .............. confirm Trellis state
+           ▼
+   phase 5 │ set_final_pipeline_status .... queued/digesting ─▸ digested
+                                                         └────▸ needs-review │ failed
+                                             │
+                                             ▼
+                 pipeline/trellis.py — the ONE write layer (add / update / link /
+                 annotate). Every graph write goes through here.
+```
+
+A single paper is just a one-item batch: `ingest_batch([record])[0]`. Nothing
+creates, enriches, or links a node outside this box; the only other graph
+writers are the one-time `scripts/migrations/` tag-repair scripts.
+
 **Input** is `list[str | dict]`: a string is a bare DOI; a dict is a full record
 (`title`, optional `doi`/`pmid`/`abstract`/`authors`/`year`/`venue`). Both
 normalize through `parse_input`, so a DOI-less record (e.g. a title-only RIS
 entry) takes the same path — it just skips the DOI batch prefetch and is enriched
 per-paper. A dict needs at least a DOI, a PMID, or a ≥ 10-char title.
 
-Per batch, in order:
-
-1. **batch resolve** — one Semantic Scholar batch call prefetches every DOI in
-   the batch.
-2. **resolve + upsert** — for each item: `parse_input` → `resolve_identity`
-   (enrich via PubMed → Semantic Scholar → Crossref, merging only missing
-   fields) → dedup against an in-memory index (**s2_id → doi → pmid → title**) →
-   `upsert_node` (create new, or merge into the existing node) → mark
-   `pipeline:digesting`.
-3. **reverse materialize** — existing nodes that cite this paper get a
-   `references` edge to it (inbound linking).
-4. **fetch + store** — fetch the paper's outbound citations and store them on the
-   node.
-5. **link** — materialize `references` edges to every cited target already in the
-   graph (deduped against a pre-built edge index).
-6. **verify + status** — confirm state, then set `pipeline:digested` (success) or
-   `pipeline:needs-review` / `pipeline:failed`.
+The phase-by-phase flow is the diagram above. Two behaviours the diagram only
+hints at:
 
 Enrichment guards: a PMID found by *search* is accepted only if its title fuzzy-
 matches the known title (≥ 85), rejecting PubMed false matches on unindexed DOIs.

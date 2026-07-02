@@ -438,9 +438,6 @@ class TestIngestBatch:
         ), patch(
             "pipeline.ingestion.resolve_identity", side_effect=resolve_identity
         ), patch(
-            "pipeline.ingestion.find_existing",
-            side_effect=AssertionError("subprocess dedup should not run"),
-        ), patch(
             "pipeline.ingestion.trellis.find_by_s2id",
             side_effect=AssertionError("find_by_s2id should not run"),
         ) as find_by_s2id, patch(
