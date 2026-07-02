@@ -1,15 +1,20 @@
 """
-ingestion.py - Single-reference ingestion pipeline orchestrator.
+ingestion.py - The single ingestion pipeline: ``ingest_batch``.
 
-Phases:
-  1. parse_input        - normalize raw input dict
-  2. resolve_identity   - fill missing metadata from PubMed / S2
-  3. find_existing      - dedup check in Trellis
-  4. upsert_node        - create or merge-update reference node
-  5. fetch_citations    - retrieve outbound citations from S2
-  6. store_citations    - read-merge-write citation metadata onto node
-  7. link_citations     - materialize edges for already-present targets
-  8. verify_outcome     - confirm Trellis state post-run
+``ingest_batch(list[str | dict])`` is the ONE entry point that creates,
+enriches, and links reference nodes. A str item is a bare DOI; a dict is a full
+record (title-only allowed). RIS import, backfill, and the CLI all funnel here;
+nothing hand-rolls a second path.
+
+Per-item work (run across the batch phases):
+  1. parse_input            - normalize a str|dict item
+  2. resolve_identity       - fill missing metadata from PubMed / S2 / Crossref
+  3. find_existing_indexed  - dedup against the in-memory node index
+  4. upsert_node            - create, or merge-update, the reference node
+  5. store_citations        - read-merge-write outbound citations onto the node
+  6. link_citations         - materialize edges for already-present targets
+  7. verify_outcome         - confirm Trellis state post-run
+  8. set_final_pipeline_status - queued/digesting -> digested | needs-review | failed
 
 LLM-independent. No description field written. No stub nodes created.
 """
@@ -40,6 +45,7 @@ from pipeline._utils import (
     slugify,
 )
 from pipeline.citations import CitationResult, fetch_outbound_citations
+from pipeline.trellis import _doi_key, _norm_title
 
 if TYPE_CHECKING:
     from pipeline.aggregator import BatchResolved
@@ -86,6 +92,9 @@ class ParseResult:
     authors: list
     year: Optional[str]
     venue: Optional[str]
+    # Source-side topical keywords (e.g. RIS KW). Used only as a fallback floor
+    # when enrichment resolves no keywords of its own — see resolve_identity.
+    keywords: list = field(default_factory=list)
 
 
 @dataclass
@@ -187,6 +196,7 @@ def _classify_failure(errors: list[str]) -> str:
         "invalid doi",
         "malformed",
         "no doi",
+        "locator",
     )
     for error in errors:
         text = str(error).lower()
@@ -223,28 +233,32 @@ def _make_tags(
     existing_tags: Optional[list] = None,
     own_reference: Optional[dict] = None,
 ) -> list[str]:
-    # Carry forward only structural/provenance tags (source:, branch:, depth:,
-    # domain:, status:, and bare custom tags). All source-derived topical tags
-    # (mesh:, kw:, field:, type:, year:, pipeline:, s2id:, pmid:) are dropped and
-    # re-derived from the freshly resolved record below. This ensures that
-    # contaminated enrichment tags from a prior cross-wired ingest never survive a
-    # re-ingest rather than accumulating indefinitely alongside the correct ones.
-    _REDERIVED = (
-        "pipeline:",
-        "s2id:",
-        "pmid:",
-        "mesh:",
-        "mesh-major:",
-        "mesh-q:",
-        "kw:",
-        "field:",
-        "type:",
-        "year:",
+    # Identity/status tags are always dropped and re-derived (they are cheap and
+    # always available from the resolved record): pipeline:, s2id:, pmid:, year:.
+    _ALWAYS_REDERIVE = ("pipeline:", "s2id:", "pmid:", "year:")
+    # Topical tags (mesh:, kw:, field:, type:) are dropped-and-re-derived ONLY
+    # when the freshly resolved record actually carries topical data. Re-deriving
+    # from an enriched record clears any contaminated tags from a prior
+    # cross-wired ingest. But when enrichment was skipped (e.g. a title-only
+    # record with sufficient basic metadata resolves no mesh/fields), the
+    # resolved record contributes nothing — preserving the existing topical tags
+    # keeps a re-ingest idempotent instead of wiping a previously enriched node.
+    _TOPICAL = ("mesh:", "mesh-major:", "mesh-q:", "kw:", "field:", "type:")
+    resolved_has_topical = any(
+        [
+            resolved.fields_of_study,
+            resolved.publication_types,
+            resolved.mesh_terms,
+            resolved.keywords,
+            resolved.mesh_major,
+            resolved.mesh_qualifiers,
+        ]
     )
+    drop_prefixes = _ALWAYS_REDERIVE + (_TOPICAL if resolved_has_topical else ())
     tags = [
         canonical_type_tag(t)
         for t in (existing_tags or [])
-        if not str(t).startswith(_REDERIVED)
+        if not str(t).startswith(drop_prefixes)
     ]
     own_reference = own_reference or {}
     own_s2_id = resolved.s2_id or _blank_to_none(own_reference.get("s2_id"))
@@ -321,9 +335,12 @@ def parse_input(raw: dict) -> ParseResult:
     authors = raw.get("authors") or []
     year = _blank_to_none(raw.get("year"))
     venue = _blank_to_none(raw.get("venue"))
+    keywords = raw.get("keywords") or []
 
     if isinstance(authors, str):
         authors = [a.strip() for a in authors.split(";") if a.strip()]
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(";") if k.strip()]
 
     if not doi and not pmid and not (title and len(title.strip()) >= 10):
         raise ValueError("Provide a DOI, PMID, or title of at least 10 characters")
@@ -336,6 +353,7 @@ def parse_input(raw: dict) -> ParseResult:
         authors=authors,
         year=str(year) if year is not None else None,
         venue=venue,
+        keywords=keywords,
     )
 
 
@@ -686,15 +704,6 @@ def resolve_identity(
         "mesh_major": [],
         "mesh_qualifiers": [],
     }
-    has_sufficient_title_only_metadata = (
-        parsed.title
-        and not parsed.doi
-        and not parsed.pmid
-        and parsed.abstract
-        and parsed.authors
-        and parsed.year
-        and parsed.venue
-    )
 
     if prefetched is not None:
         fields.update(
@@ -775,15 +784,22 @@ def resolve_identity(
             not _blank_to_none(fields.get("abstract")),
         ]
     )
-    if not has_sufficient_title_only_metadata and (
+    if (
         prefetched is None
         or not _blank_to_none(fields.get("title"))
         or needs_enrichment
     ):
         fields["source"] = _fill_from_pubmed(parsed, fields)
         fields["source"] = _fill_from_s2(fields)
-        if not _blank_to_none(fields.get("title")):
+        if not parsed.doi or not _blank_to_none(fields.get("title")):
             fields["source"] = _fill_from_crossref(fields)
+
+    # Fallback floor: if enrichment resolved no keywords, keep the source-side
+    # keywords (e.g. RIS KW) so a record enrichment cannot find is not left with
+    # none. Enrichment-derived keywords always win when present, so this only
+    # applies to the enrichment-miss case.
+    if not fields.get("keywords") and parsed.keywords:
+        fields["keywords"] = list(parsed.keywords)
 
     title = _blank_to_none(fields.get("title"))
     if not title:
@@ -809,26 +825,6 @@ def resolve_identity(
     )
 
 
-def find_existing(resolved: ResolveResult) -> DedupResult:
-    if resolved.s2_id:
-        node = trellis.find_by_s2id(resolved.s2_id)
-        if node:
-            return DedupResult(node, "s2_id")
-    if resolved.doi:
-        node = trellis.find_by_doi(resolved.doi)
-        if node:
-            return DedupResult(node, "doi")
-    if resolved.pmid:
-        node = trellis.find_by_pmid(resolved.pmid)
-        if node:
-            return DedupResult(node, "pmid")
-    if resolved.title:
-        node = trellis.find_by_title(resolved.title)
-        if node:
-            return DedupResult(node, "title")
-    return DedupResult(None, None)
-
-
 def find_existing_indexed(resolved: ResolveResult, index: dict) -> DedupResult:
     if resolved.s2_id:
         node = trellis.dedup_check_indexed(index, s2id=resolved.s2_id)
@@ -849,29 +845,57 @@ def find_existing_indexed(resolved: ResolveResult, index: dict) -> DedupResult:
     return DedupResult(None, None)
 
 
-def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
-    metadata = {"reference": _reference_metadata(resolved)}
-    tags = _make_tags(resolved)
-    citation = _citation_string(resolved)
-    today = date.today().isoformat()
+def _create_node(resolved: ResolveResult, metadata: dict, tags: list[str]) -> dict:
+    """
+    Create a new reference node in Trellis. Helper factored from upsert_node
+    to support intra-batch dedup via live index.
+    """
+    node = trellis.add_reference(
+        resolved.title,
+        uri=_canonical_doi_uri(resolved.doi),
+        abstract=resolved.abstract,
+        citation=_citation_string(resolved),
+        metadata=metadata,
+        tags=tags,
+    )
+    return node
 
-    if dedup.existing_node is None:
-        node = trellis.add_reference(
-            resolved.title,
-            uri=_canonical_doi_uri(resolved.doi),
-            abstract=resolved.abstract,
-            citation=citation,
-            metadata=metadata,
-            tags=tags,
-        )
-        slug = _node_slug(node)
-        if not slug:
-            raise RuntimeError("Trellis add did not return a slug")
-        trellis.annotate_node(
-            slug, f"[{today}] Created via ingestion pipeline; source: {resolved.source}"
-        )
-        return UpsertResult(slug=slug, created=True)
 
+def _register_node_index(index: dict, resolved: ResolveResult, node: dict) -> None:
+    """
+    Register a newly-created node into the live in-memory index by s2_id,
+    doi (including alt_dois), pmid, and normalized title (10+ chars).
+    """
+    if resolved.s2_id:
+        index.setdefault("by_s2id", {})[resolved.s2_id] = node
+    if resolved.doi:
+        doi_key = _doi_key(resolved.doi)
+        if doi_key:
+            index.setdefault("by_doi", {})[doi_key] = node
+    for alt_doi in resolved.alt_dois or []:
+        doi_key = _doi_key(alt_doi)
+        if doi_key:
+            index.setdefault("by_doi", {})[doi_key] = node
+    if resolved.pmid:
+        index.setdefault("by_pmid", {})[str(resolved.pmid)] = node
+    title = _norm_title(resolved.title)
+    if title and len(title) >= 10:
+        index.setdefault("by_title", {})[title] = node
+
+
+def _merge_into_existing(
+    resolved: ResolveResult,
+    dedup: DedupResult,
+    metadata: dict,
+    citation: str,
+    today: str,
+) -> UpsertResult:
+    """
+    Merge a resolved record into an already-existing node (dedup match): fill
+    missing reference metadata, re-derive tags (guard B preserves topical tags
+    on sparse re-ingests), and annotate. Shared by the snapshot-dedup path and
+    the in-lock recheck path so the two cannot drift.
+    """
     slug_or_id = (
         dedup.existing_node.get("id")
         or dedup.existing_node.get("uuid")
@@ -902,10 +926,61 @@ def upsert_node(resolved: ResolveResult, dedup: DedupResult) -> UpsertResult:
     return UpsertResult(slug=slug_or_id, created=False)
 
 
+def upsert_node(
+    resolved: ResolveResult,
+    dedup: DedupResult,
+    index: Optional[dict] = None,
+    node_lock: Optional[threading.Lock] = None,
+) -> UpsertResult:
+    metadata = {"reference": _reference_metadata(resolved)}
+    tags = _make_tags(resolved)
+    citation = _citation_string(resolved)
+    today = date.today().isoformat()
+
+    if dedup.existing_node is None:
+        # When both index and lock are provided, re-check against the LIVE index
+        # while holding the lock to close the race between find_existing_indexed
+        # and node creation. This prevents duplicate nodes from identical records
+        # in the same batch. Unlike the edge index (a set of keys reserved before
+        # the write in link_nodes), a node's index entry is the node dict itself
+        # (slug/tags/metadata) — a placeholder reservation would hand a waiter an
+        # incomplete node, so we hold the lock across the create instead. The cost
+        # is bounded: add_reference writes to local SQLite (which serializes writes
+        # regardless), and the expensive network resolve already ran in parallel.
+        if index is not None and node_lock is not None:
+            with node_lock:
+                dedup_recheck = find_existing_indexed(resolved, index)
+                if dedup_recheck.existing_node is not None:
+                    return _merge_into_existing(
+                        resolved, dedup_recheck, metadata, citation, today
+                    )
+                # Still no match: create the node and register it before releasing.
+                node = _create_node(resolved, metadata, tags)
+                _register_node_index(index, resolved, node)
+        else:
+            node = _create_node(resolved, metadata, tags)
+
+        slug = _node_slug(node)
+        if not slug:
+            raise RuntimeError("Trellis add did not return a slug")
+        trellis.annotate_node(
+            slug, f"[{today}] Created via ingestion pipeline; source: {resolved.source}"
+        )
+        return UpsertResult(slug=slug, created=True)
+
+    return _merge_into_existing(resolved, dedup, metadata, citation, today)
+
+
 def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult:
     node = trellis.get_node(slug)
     current_meta = dict(node.get("metadata") or {})
     ref = dict(current_meta.get("reference") or {})
+    existing_items = (ref.get("outbound_citations") or {}).get("items") or []
+    # Idempotency guard: a re-ingest that fetched no citations (e.g. a title-only
+    # record that never resolved a DOI) must not erase the citation set a prior
+    # enriched run already stored. Only overwrite when we actually have citations.
+    if not citations.items and existing_items:
+        return CitationStoreResult(stored=len(existing_items))
     ref["outbound_citations"] = {
         "source": citations.source,
         "retrieved_at": citations.retrieved_at,
@@ -1013,33 +1088,6 @@ def verify_outcome(slug: str, edge_count: int = 0) -> VerifyResult:
         )
 
 
-def ingest_reference_pipeline(raw: dict, prefetched=None) -> IngestionOutcome:
-    outcome = IngestionOutcome()
-    try:
-        outcome.parse = parse_input(raw)
-        outcome.resolve = resolve_identity(outcome.parse, prefetched=prefetched)
-        outcome.dedup = find_existing(outcome.resolve)
-        outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
-        if prefetched is not None and prefetched.citations:
-            citations = CitationResult(
-                source="s2-batch",
-                retrieved_at=date.today().isoformat(),
-                items=prefetched.citations,
-            )
-        else:
-            citations = fetch_outbound_citations(outcome.resolve.doi or "")
-        outcome.citation_store = store_citations(outcome.upsert.slug, citations)
-        index = trellis.build_node_index()
-        outcome.link = link_citations(outcome.upsert.slug, citations, index=index)
-        outcome.verify = verify_outcome(
-            outcome.upsert.slug,
-            edge_count=(outcome.link.linked if outcome.link else 0),
-        )
-    except (ValueError, RuntimeError) as e:
-        outcome.errors.append(str(e))
-    return outcome
-
-
 def format_metrics_table(metrics: BatchMetrics) -> str:
     lines = [
         "Batch metrics",
@@ -1059,27 +1107,53 @@ def format_metrics_table(metrics: BatchMetrics) -> str:
     return "\n".join(lines)
 
 
+def _as_raw_input(item: "str | dict") -> dict:
+    # A batch item is either a bare DOI string (the historical contract) or a
+    # full record dict from a non-DOI source (e.g. an RIS entry with only a
+    # title). Both funnel through parse_input so there is exactly one ingestion
+    # path; a string is just the degenerate {"doi": ...} case.
+    if isinstance(item, str):
+        return {"doi": item}
+    if isinstance(item, dict):
+        return item
+    raise TypeError(f"batch item must be str or dict, got {type(item).__name__}")
+
+
+def _item_doi(item: "str | dict") -> Optional[str]:
+    # Prefetch keys are DOIs; dict records without one fall back to per-paper
+    # enrichment inside resolve_identity, so absence here is expected.
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return item.get("doi")
+    return None
+
+
 def resolve_and_upsert(
-    item: tuple[int, str],
+    item: tuple[int, "str | dict"],
     outcomes: list[IngestionOutcome],
     prefetched_for_doi,
     resolve_timings: list[float],
     upsert_timings: list[float],
     timing_lock: threading.Lock,
     index: dict,
+    node_lock: Optional[threading.Lock] = None,
 ) -> Optional[tuple[int, str, str]]:
-    idx, doi = item
+    idx, raw_item = item
     outcome = outcomes[idx]
     try:
-        outcome.parse = parse_input({"doi": doi})
+        outcome.parse = parse_input(_as_raw_input(raw_item))
+        doi = _item_doi(raw_item)
         t0 = time.perf_counter()
         outcome.resolve = resolve_identity(
-            outcome.parse, prefetched=prefetched_for_doi(doi)
+            outcome.parse, prefetched=prefetched_for_doi(doi) if doi else None
         )
         resolve_elapsed = time.perf_counter() - t0
         outcome.dedup = find_existing_indexed(outcome.resolve, index)
         t0 = time.perf_counter()
-        outcome.upsert = upsert_node(outcome.resolve, outcome.dedup)
+        outcome.upsert = upsert_node(
+            outcome.resolve, outcome.dedup, index=index, node_lock=node_lock
+        )
         upsert_elapsed = time.perf_counter() - t0
         with timing_lock:
             resolve_timings.append(resolve_elapsed)
@@ -1110,12 +1184,13 @@ def fetch_and_store(
     item: tuple[int, str, str],
     outcomes: list[IngestionOutcome],
     prefetched_for_doi,
-    dois: list[str],
+    items: "list[str | dict]",
 ) -> Optional[tuple[int, str, CitationResult]]:
     idx, doi, slug = item
     outcome = outcomes[idx]
     try:
-        prefetched = prefetched_for_doi(dois[idx])
+        item_doi = _item_doi(items[idx])
+        prefetched = prefetched_for_doi(item_doi) if item_doi else None
         if prefetched is not None and prefetched.citations:
             citations = CitationResult(
                 source="s2-batch",
@@ -1123,7 +1198,9 @@ def fetch_and_store(
                 items=prefetched.citations,
             )
         else:
-            citations = fetch_outbound_citations(doi)
+            # doi may be None for a title-only record that never resolved an
+            # identifier; outbound-citation fetch is DOI-keyed so it no-ops.
+            citations = fetch_outbound_citations(doi or "")
         outcome.citation_store = store_citations(slug, citations)
         return idx, slug, citations
     except Exception as e:
@@ -1232,6 +1309,27 @@ def _doi_from_node(node: dict) -> Optional[str]:
     return None
 
 
+def _record_from_node(node: dict) -> dict:
+    """
+    Reconstruct a parse_input-shaped record from a stored node, so a DOI-less
+    node (e.g. a legacy title-only scaffold stub) can be re-fed through
+    ingest_batch's dict path instead of being dropped for lack of a DOI. Title
+    and abstract live at the node top level; the rest is in metadata.reference.
+    """
+    reference = (node.get("metadata") or {}).get("reference") or {}
+    if not isinstance(reference, dict):
+        reference = {}
+    return {
+        "title": node.get("title"),
+        "doi": _doi_from_node(node),
+        "pmid": reference.get("pmid"),
+        "abstract": node.get("abstract"),
+        "authors": reference.get("authors") or [],
+        "year": reference.get("year"),
+        "venue": reference.get("venue"),
+    }
+
+
 def backfill_nodes(
     workers: int = 8,
     only_missing: bool = False,
@@ -1240,11 +1338,14 @@ def backfill_nodes(
 ) -> tuple[list[IngestionOutcome], BackfillResult]:
     """
     Full re-scan of existing entries through the SAME pipeline used for new
-    instantiation. Each existing node already carries its DOI, so feeding those
-    DOIs through ingest_batch updates the nodes in place via upsert_node's
-    dedup-merge path (an upsert: existing -> update, missing -> insert; no
-    duplicates) while building the citation tags AND edges that older scaffold
-    runs never produced.
+    instantiation. DOI-bearing nodes are re-fed as bare DOI strings; DOI-less
+    nodes (e.g. legacy title-only scaffold stubs) are re-fed as dict records via
+    ingest_batch's str|dict contract, so the pipeline can resolve a locator from
+    the title instead of dropping them. Either way ingest_batch updates the node
+    in place through upsert_node's dedup-merge path (existing -> update, missing
+    -> insert; no duplicates) while building the citation tags AND edges that
+    older scaffold runs never produced. A node is skipped only when it has no
+    DOI, PMID, or title of at least 10 characters to resolve on.
 
     only_missing=True is an optional optimization that skips nodes already
     carrying topical tags; the default (False) reprocesses every entry, which is
@@ -1274,19 +1375,29 @@ def backfill_nodes(
         skipped_already_tagged=0,
     )
 
-    dois: list[str] = []
+    items: list["str | dict"] = []
     for node in candidates:
         if only_missing and _has_topical_backfill_tags(node):
             result.skipped_already_tagged += 1
             continue
         doi = _doi_from_node(node)
-        if not doi:
+        if doi:
+            # DOI-bearing: feed the bare DOI string so it joins the batch prefetch.
+            items.append(doi)
+            continue
+        # No DOI: re-feed the stored record as a dict so ingest_batch's dict path
+        # can resolve a locator from the title (S2/PubMed/Crossref) instead of
+        # dropping the node. Skip only when there is nothing to resolve on.
+        record = _record_from_node(node)
+        try:
+            parse_input(record)
+        except ValueError:
             result.skipped_no_doi += 1
             continue
-        dois.append(doi)
+        items.append(record)
 
-    result.resolvable = len(dois)
-    if not dois:
+    result.resolvable = len(items)
+    if not items:
         return [], result
 
     if chunk_size <= 0:
@@ -1297,8 +1408,8 @@ def backfill_nodes(
     # dedup-merge upsert -> fetch citations -> link edges -> verify -> status.
     # Each chunk builds its own index inside ingest_batch so later chunks can see
     # nodes and edges created by earlier chunks.
-    for start in range(0, len(dois), chunk_size):
-        chunk = dois[start : start + chunk_size]
+    for start in range(0, len(items), chunk_size):
+        chunk = items[start : start + chunk_size]
         outcomes, _metrics = ingest_batch(chunk, workers=workers)
         all_outcomes.extend(outcomes)
         for outcome in outcomes:
@@ -1319,28 +1430,35 @@ def backfill_nodes(
 
 
 def ingest_batch(
-    dois: list[str], workers: int = 8
+    items: "list[str | dict]", workers: int = 8
 ) -> tuple[list[IngestionOutcome], BatchMetrics]:
+    # items: a list whose elements are either bare DOI strings (historical
+    # contract) or full record dicts (e.g. RIS entries, possibly DOI-less).
+    # There is one ingestion path: every element is normalized by parse_input
+    # inside resolve_and_upsert. DOI strings still drive the S2 batch prefetch;
+    # dict records contribute their DOI to the prefetch when they have one and
+    # otherwise fall back to per-paper enrichment in resolve_identity.
     batch_t0 = time.perf_counter()
     phases: list[PhaseMetrics] = []
 
-    def add_phase(name: str, wall_seconds: float, items: int) -> None:
-        per_item_seconds = wall_seconds / items if items else 0.0
+    def add_phase(name: str, wall_seconds: float, count: int) -> None:
+        per_item_seconds = wall_seconds / count if count else 0.0
         phases.append(
             PhaseMetrics(
                 name=name,
                 wall_seconds=wall_seconds,
                 per_item_seconds=per_item_seconds,
-                items=items,
+                items=count,
             )
         )
 
     from pipeline.aggregator import batch_resolve
 
     t0 = time.perf_counter()
-    resolved_map = batch_resolve(dois)
+    prefetch_dois = [doi for doi in (_item_doi(item) for item in items) if doi]
+    resolved_map = batch_resolve(prefetch_dois)
     elapsed = time.perf_counter() - t0
-    add_phase("phase0 batch resolve", elapsed, len(dois))
+    add_phase("phase0 batch resolve", elapsed, len(items))
 
     def prefetched_for_doi(doi: str):
         key = bare_doi(doi)
@@ -1352,10 +1470,11 @@ def ingest_batch(
     node_count_at_index = len(index)
     add_phase("index build", elapsed, node_count_at_index)
 
-    outcomes = [IngestionOutcome() for _ in dois]
+    outcomes = [IngestionOutcome() for _ in items]
     resolve_timings: list[float] = []
     upsert_timings: list[float] = []
     timing_lock = threading.Lock()
+    node_lock = threading.Lock()
 
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -1369,12 +1488,13 @@ def ingest_batch(
                     upsert_timings,
                     timing_lock,
                     index,
+                    node_lock,
                 ),
-                enumerate(dois),
+                enumerate(items),
             )
         )
     elapsed = time.perf_counter() - t0
-    add_phase("phase1 resolve+upsert", elapsed, len(dois))
+    add_phase("phase1 resolve+upsert", elapsed, len(items))
     add_phase(
         "phase1 resolve_identity aggregate", sum(resolve_timings), len(resolve_timings)
     )
@@ -1414,7 +1534,7 @@ def ingest_batch(
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         phase2_results = list(
             executor.map(
-                lambda item: fetch_and_store(item, outcomes, prefetched_for_doi, dois),
+                lambda item: fetch_and_store(item, outcomes, prefetched_for_doi, items),
                 upserted,
             )
         )
@@ -1514,5 +1634,6 @@ if __name__ == "__main__":
     }
     if not raw:
         parser.error("Provide at least one of --doi, --pmid, --title")
-    outcome = ingest_reference_pipeline(raw)
-    print(json.dumps(dataclasses.asdict(outcome), indent=2, default=str))
+    # A single reference is just a one-item batch through the one pipeline.
+    outcomes, _metrics = ingest_batch([raw])
+    print(json.dumps(dataclasses.asdict(outcomes[0]), indent=2, default=str))

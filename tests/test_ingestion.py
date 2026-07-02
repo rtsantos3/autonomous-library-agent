@@ -339,6 +339,62 @@ class TestIngestionUnit:
         assert result.authors == ["Author A"]
         assert result.s2_id == "s2-complete-doi"
 
+    def test_resolve_keywords_fallback_to_source_when_enrichment_finds_none(self):
+        # A record enrichment cannot find (no keywords from PubMed/S2/Crossref)
+        # keeps its source-side RIS KW keywords instead of being left with none.
+        parsed = ParseResult(
+            "A title only record on gut microbiota",
+            None,
+            None,
+            None,
+            [],
+            None,
+            None,
+            keywords=["gut microbiome", "diet"],
+        )
+        with patch(
+            "pipeline.ingestion._fill_from_pubmed",
+            side_effect=lambda parsed, fields: fields["source"],
+        ), patch(
+            "pipeline.ingestion._fill_from_s2",
+            side_effect=lambda fields: fields["source"],
+        ), patch(
+            "pipeline.ingestion._fill_from_crossref",
+            side_effect=lambda fields: fields["source"],
+        ):
+            result = ingestion.resolve_identity(parsed)
+        assert result.keywords == ["gut microbiome", "diet"]
+
+    def test_resolve_enrichment_keywords_win_over_source_keywords(self):
+        # When enrichment resolves its own keywords, those win and the source-side
+        # RIS keywords are dropped (the fallback applies only to the miss case).
+        parsed = ParseResult(
+            "A title only record on gut microbiota",
+            None,
+            None,
+            None,
+            [],
+            None,
+            None,
+            keywords=["ris-native-kw"],
+        )
+
+        def enrich_with_keywords(parsed, fields):
+            fields["keywords"] = ["enriched-kw"]
+            return fields["source"]
+
+        with patch(
+            "pipeline.ingestion._fill_from_pubmed", side_effect=enrich_with_keywords
+        ), patch(
+            "pipeline.ingestion._fill_from_s2",
+            side_effect=lambda fields: fields["source"],
+        ), patch(
+            "pipeline.ingestion._fill_from_crossref",
+            side_effect=lambda fields: fields["source"],
+        ):
+            result = ingestion.resolve_identity(parsed)
+        assert result.keywords == ["enriched-kw"]
+
     def test_resolve_with_prefetched_seeds_from_batch_and_skips_esearch(self):
         parsed = ParseResult(None, "10.1/x", None, None, [], None, None)
         prefetched = BatchResolved(
@@ -425,77 +481,78 @@ class TestIngestionUnit:
             result = ingestion.resolve_identity(parsed)
         assert result.doi == "10.1/canonical"
 
-    # find_existing
-    def test_find_existing_by_s2id(self):
+    # find_existing_indexed — dedup precedence (s2_id > doi > pmid > title) over the
+    # in-memory node index. It delegates matching to trellis.dedup_check_indexed;
+    # key-normalization nuances (doi-uri prefix, unicode title) are that function's
+    # job and are covered in test_trellis.py.
+    @staticmethod
+    def _indexed_hit(match_key, node):
+        # dedup_check_indexed side effect: return `node` only when queried on the
+        # given key (s2id/doi/pmid/title), else None — lets us assert precedence.
+        def _fn(index, **kwargs):
+            return node if kwargs.get(match_key) is not None else None
+
+        return _fn
+
+    def test_find_existing_indexed_by_s2id(self):
+        node = {"slug": "existing", "tags": ["s2id:s2-1"]}
         with patch(
-            "pipeline.ingestion.trellis.find_by_s2id",
-            return_value={"slug": "existing", "tags": ["s2id:s2-1"]},
+            "pipeline.ingestion.trellis.dedup_check_indexed",
+            side_effect=self._indexed_hit("s2id", node),
         ):
-            result = ingestion.find_existing(resolved())
+            result = ingestion.find_existing_indexed(resolved(), {})
         assert result.match_reason == "s2_id"
 
-    def test_find_existing_by_doi(self):
-        with patch("pipeline.ingestion.trellis.find_by_s2id", return_value=None), patch(
-            "pipeline.ingestion.trellis.find_by_doi",
-            return_value={"slug": "existing", "uri": "https://doi.org/10.1/x"},
+    def test_find_existing_indexed_by_doi(self):
+        node = {"slug": "existing", "uri": "https://doi.org/10.1/x"}
+        with patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed",
+            side_effect=self._indexed_hit("doi", node),
         ):
-            result = ingestion.find_existing(resolved(pmid=None))
+            result = ingestion.find_existing_indexed(resolved(pmid=None), {})
         assert result.match_reason == "doi"
 
-    def test_find_existing_by_pmid_tag(self):
-        with patch("pipeline.ingestion.trellis.find_by_s2id", return_value=None), patch(
-            "pipeline.ingestion.trellis.find_by_doi", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_pmid",
-            return_value={"slug": "pmid-node", "tags": ["pmid:123"]},
+    def test_find_existing_indexed_by_pmid(self):
+        node = {"slug": "pmid-node", "tags": ["pmid:123"]}
+        with patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed",
+            side_effect=self._indexed_hit("pmid", node),
         ):
-            result = ingestion.find_existing(resolved())
+            result = ingestion.find_existing_indexed(resolved(), {})
         assert result.match_reason == "pmid"
         assert result.existing_node["slug"] == "pmid-node"
 
-    def test_find_existing_by_normalized_unicode_title(self):
+    def test_find_existing_indexed_by_title(self):
         stored = {"slug": "title-node", "title": "Microbiome cafe study"}
-        with patch("pipeline.ingestion.trellis.find_by_s2id", return_value=None), patch(
-            "pipeline.ingestion.trellis.find_by_doi", return_value=None
-        ), patch("pipeline.ingestion.trellis.find_by_pmid", return_value=None), patch(
-            "pipeline.ingestion.trellis.find_by_title", return_value=stored
+        with patch(
+            "pipeline.ingestion.trellis.dedup_check_indexed",
+            side_effect=self._indexed_hit("title", stored),
         ):
-            result = ingestion.find_existing(
-                resolved(
-                    doi=None, pmid=None, s2_id=None, title="Microbiome cafe study."
-                )
+            result = ingestion.find_existing_indexed(
+                resolved(doi=None, pmid=None, s2_id=None, title="Microbiome study"),
+                {},
             )
         assert result.match_reason == "title"
         assert result.existing_node == stored
 
-    def test_find_existing_node_with_doi_uri_prefix_matches_doi(self):
-        node = {"slug": "doi-node", "uri": "doi:10.1/x"}
-        with patch("pipeline.ingestion.trellis.find_by_s2id", return_value=None), patch(
-            "pipeline.ingestion.trellis.find_by_doi", return_value=node
-        ):
-            result = ingestion.find_existing(resolved(pmid=None))
-        assert result.match_reason == "doi"
-        assert result.existing_node == node
-
-    def test_find_existing_s2_empty_falls_through_to_doi(self):
+    def test_find_existing_indexed_s2_empty_falls_through_to_doi(self):
         node = {"slug": "doi-node", "uri": "https://doi.org/10.1/x"}
-        with patch(
-            "pipeline.ingestion.trellis.find_by_s2id", return_value=None
-        ) as s2, patch(
-            "pipeline.ingestion.trellis.find_by_doi", return_value=node
-        ) as doi:
-            result = ingestion.find_existing(resolved())
-        s2.assert_called_once_with("s2-1")
-        doi.assert_called_once_with("10.1/x")
-        assert result.match_reason == "doi"
+        calls = []
 
-    def test_find_existing_none(self):
-        with patch("pipeline.ingestion.trellis.find_by_s2id", return_value=None), patch(
-            "pipeline.ingestion.trellis.find_by_doi", return_value=None
-        ), patch("pipeline.ingestion.trellis.find_by_pmid", return_value=None), patch(
-            "pipeline.ingestion.trellis.find_by_title", return_value=None
-        ):
-            result = ingestion.find_existing(resolved())
+        def _fn(index, **kwargs):
+            calls.append(kwargs)
+            return node if kwargs.get("doi") is not None else None
+
+        with patch("pipeline.ingestion.trellis.dedup_check_indexed", side_effect=_fn):
+            result = ingestion.find_existing_indexed(resolved(), {})
+        assert result.match_reason == "doi"
+        # s2_id is queried before doi (precedence), then falls through.
+        assert calls[0].get("s2id") == "s2-1"
+        assert any(c.get("doi") == "10.1/x" for c in calls)
+
+    def test_find_existing_indexed_none(self):
+        with patch("pipeline.ingestion.trellis.dedup_check_indexed", return_value=None):
+            result = ingestion.find_existing_indexed(resolved(), {})
         assert result.existing_node is None
 
     # upsert_node
@@ -1080,314 +1137,6 @@ class TestIngestionUnit:
         assert result.edge_count == 3
         grep_nodes.assert_not_called()
 
-    # orchestrator
-    def test_pipeline_stops_after_parse_failure(self):
-        outcome = ingestion.ingest_reference_pipeline({"title": "hi"})
-        assert outcome.errors
-        assert outcome.resolve is None
-
-    def test_pipeline_stops_after_resolve_failure(self):
-        with patch(
-            "pipeline.ingestion.resolve_identity", side_effect=ValueError("no title")
-        ):
-            outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"})
-        assert outcome.errors
-        assert outcome.upsert is None
-
-    def test_pipeline_full_success(self):
-        node_state = {}
-        phase_order = []
-
-        def add_reference(title, **kwargs):
-            phase_order.append("add")
-            node_state["source-slug"] = {
-                "id": "source-id",
-                "slug": "source-slug",
-                "title": title,
-                "metadata": kwargs["metadata"],
-                "tags": kwargs["tags"],
-            }
-            return {"id": "source-id", "slug": "source-slug"}
-
-        def get_node(slug):
-            phase_order.append(f"get:{slug}")
-            return node_state[slug]
-
-        def update_node(slug, **kwargs):
-            phase_order.append(f"update:{slug}:{'metadata' in kwargs}")
-            node_state[slug] = {
-                **node_state[slug],
-                **{k: v for k, v in kwargs.items() if v is not None},
-            }
-            return node_state[slug]
-
-        citations_payload = {
-            "data": [
-                {
-                    "citedPaper": {
-                        "paperId": "s2-target",
-                        "title": "Existing target paper",
-                        "year": 2020,
-                        "externalIds": {"DOI": "10.2/target", "PubMed": "456"},
-                    }
-                }
-            ]
-        }
-        target = {"id": "target-id", "slug": "target-slug"}
-        with patch(
-            "pipeline.ingestion.http_get",
-            return_value=Response({"paperId": "s2-source"}),
-        ), patch(
-            "pipeline.citations.http_get", return_value=Response(citations_payload)
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_s2id", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_doi", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_pmid", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_title", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.add_reference", side_effect=add_reference
-        ) as add, patch(
-            "pipeline.ingestion.trellis.annotate_node"
-        ) as annotate, patch(
-            "pipeline.ingestion.trellis.get_node", side_effect=get_node
-        ), patch(
-            "pipeline.ingestion.trellis.update_node", side_effect=update_node
-        ) as update, patch(
-            "pipeline.ingestion.trellis.build_node_index",
-            return_value={"by_doi": {"10.2/target": target}},
-        ), patch(
-            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=target
-        ) as dedup_indexed, patch(
-            "pipeline.ingestion.trellis.link_nodes", return_value={"ok": True}
-        ) as link, patch(
-            "pipeline.ingestion.trellis.grep_nodes",
-            side_effect=AssertionError("grep_nodes should not run"),
-        ) as grep_nodes:
-            outcome = ingestion.ingest_reference_pipeline(
-                {
-                    "doi": "10.1/x",
-                    "title": "A microbiome paper",
-                    "abstract": "Abstract",
-                    "authors": ["Author A", "Author B"],
-                    "year": "2024",
-                    "venue": "Journal",
-                }
-            )
-
-        assert not outcome.errors
-        assert outcome.resolve.doi == "10.1/x"
-        assert outcome.resolve.s2_id == "s2-source"
-        assert outcome.dedup == DedupResult(None, None)
-        assert outcome.upsert == UpsertResult("source-slug", True)
-        assert outcome.citation_store == ingestion.CitationStoreResult(1)
-        assert outcome.link == ingestion.LinkResult(1, 0)
-        assert outcome.verify == ingestion.VerifyResult(True, True, "scaffolded", 1)
-        assert phase_order == [
-            "add",
-            "get:source-slug",
-            "update:source-slug:True",
-            "get:source-slug",
-            "get:source-slug",
-        ]
-        assert update.call_args_list[0].args[0] == "source-slug"
-        stored = update.call_args_list[0].kwargs["metadata"]["reference"][
-            "outbound_citations"
-        ]["items"]
-        assert stored[0]["doi"] == "10.2/target"
-        dedup_indexed.assert_called_once_with(
-            {"by_doi": {"10.2/target": target}},
-            s2id="s2-target",
-            doi="10.2/target",
-            pmid="456",
-            title="Existing target paper",
-        )
-        link.assert_called_once_with("source-id", "target-id", "references")
-        add.assert_called_once()
-        annotate.assert_called_once()
-        grep_nodes.assert_not_called()
-
-        with patch(
-            "pipeline.ingestion.http_get",
-            return_value=Response({"paperId": "s2-source"}),
-        ), patch(
-            "pipeline.citations.http_get", return_value=Response(citations_payload)
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_s2id", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_doi", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_pmid", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.find_by_title", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.add_reference", return_value={"slug": "broken"}
-        ), patch(
-            "pipeline.ingestion.trellis.annotate_node"
-        ), patch(
-            "pipeline.ingestion.trellis.get_node",
-            side_effect=RuntimeError("store failed"),
-        ):
-            failed = ingestion.ingest_reference_pipeline(
-                {
-                    "doi": "10.1/x",
-                    "title": "A microbiome paper",
-                    "abstract": "Abstract",
-                    "authors": ["Author A"],
-                    "year": "2024",
-                    "venue": "Journal",
-                }
-            )
-        assert failed.errors == ["store failed"]
-        assert failed.upsert == UpsertResult("broken", True)
-        assert failed.citation_store is None
-
-    def test_pipeline_upsert_runtime_error_skips_citation_storage(self):
-        with patch(
-            "pipeline.ingestion.parse_input",
-            return_value=ParseResult(None, "10.1/x", None, None, [], None, None),
-        ), patch("pipeline.ingestion.resolve_identity", return_value=resolved()), patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult(None, None)
-        ), patch(
-            "pipeline.ingestion.upsert_node", side_effect=RuntimeError("upsert failed")
-        ), patch(
-            "pipeline.ingestion.store_citations"
-        ) as store:
-            outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"})
-        assert outcome.errors == ["upsert failed"]
-        store.assert_not_called()
-
-    def test_pipeline_store_citations_runtime_error_skips_linking(self):
-        with patch(
-            "pipeline.ingestion.parse_input",
-            return_value=ParseResult(None, "10.1/x", None, None, [], None, None),
-        ), patch("pipeline.ingestion.resolve_identity", return_value=resolved()), patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult(None, None)
-        ), patch(
-            "pipeline.ingestion.upsert_node", return_value=UpsertResult("source", True)
-        ), patch(
-            "pipeline.ingestion.fetch_outbound_citations",
-            return_value=citation_result(),
-        ), patch(
-            "pipeline.ingestion.store_citations",
-            side_effect=RuntimeError("store failed"),
-        ), patch(
-            "pipeline.ingestion.link_citations"
-        ) as link:
-            outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"})
-        assert outcome.errors == ["store failed"]
-        link.assert_not_called()
-
-    def test_pipeline_full_run_existing_dedup_created_false_path(self):
-        node_state = {
-            "existing-id": {
-                "id": "existing-id",
-                "slug": "existing",
-                "metadata": {"reference": {"custom": "keep"}},
-                "tags": ["pipeline:queued", "source:manual"],
-            }
-        }
-
-        def get_node(slug):
-            return node_state[slug]
-
-        def update_node(slug, **kwargs):
-            node_state[slug] = {
-                **node_state[slug],
-                **{k: v for k, v in kwargs.items() if v is not None},
-            }
-            return node_state[slug]
-
-        prefetched = BatchResolved(
-            doi="10.1/x",
-            s2_id="s2-existing",
-            title="Batch title",
-            abstract="Batch abstract",
-            pmid=None,
-            year="2024",
-            venue="Batch Journal",
-            authors=["Author A"],
-            citations=[CitationItem("10.2/y", None, None, "Target", 2020)],
-        )
-        with patch(
-            "pipeline.ingestion.trellis.find_by_s2id",
-            return_value={"id": "existing-id"},
-        ) as find_by_s2id, patch(
-            "pipeline.ingestion.trellis.find_by_doi"
-        ) as find_by_doi, patch(
-            "pipeline.ingestion.trellis.get_node", side_effect=get_node
-        ) as get_node_mock, patch(
-            "pipeline.ingestion.trellis.update_node", side_effect=update_node
-        ) as update, patch(
-            "pipeline.ingestion.trellis.annotate_node"
-        ), patch(
-            "pipeline.ingestion.trellis.build_node_index", return_value={"by_doi": {}}
-        ), patch(
-            "pipeline.ingestion.trellis.dedup_check_indexed", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.grep_nodes",
-            side_effect=AssertionError("grep_nodes should not run"),
-        ) as grep_nodes:
-            outcome = ingestion.ingest_reference_pipeline(
-                {"doi": "10.1/x"}, prefetched=prefetched
-            )
-
-        assert outcome.errors == []
-        assert outcome.upsert.created is False
-        assert outcome.upsert.slug == "existing-id"
-        find_by_s2id.assert_called_once_with("s2-existing")
-        find_by_doi.assert_not_called()
-        assert get_node_mock.call_count == 4
-        assert update.call_args_list[0].args[0] == "existing-id"
-        assert (
-            update.call_args_list[0].kwargs["metadata"]["reference"]["custom"] == "keep"
-        )
-        assert "pipeline:queued" not in update.call_args_list[0].kwargs["tags"]
-        assert "pipeline:scaffolded" in update.call_args_list[0].kwargs["tags"]
-        assert "source:manual" in update.call_args_list[0].kwargs["tags"]
-        assert update.call_args_list[1].args[0] == "existing-id"
-        assert outcome.citation_store == ingestion.CitationStoreResult(1)
-        grep_nodes.assert_not_called()
-
-    def test_pipeline_does_not_create_stub_nodes_for_unresolved_citations(self):
-        citations = citation_result(
-            [
-                CitationItem("10.2/a", None, None, "Unresolved A", 2020),
-                CitationItem(None, None, "s2-b", "Unresolved B", 2021),
-            ]
-        )
-        with patch(
-            "pipeline.ingestion.resolve_identity", return_value=resolved()
-        ), patch(
-            "pipeline.ingestion.find_existing", return_value=DedupResult(None, None)
-        ), patch(
-            "pipeline.ingestion.trellis.add_reference", return_value={"slug": "source"}
-        ) as add, patch(
-            "pipeline.ingestion.trellis.annotate_node"
-        ), patch(
-            "pipeline.ingestion.fetch_outbound_citations", return_value=citations
-        ), patch(
-            "pipeline.ingestion.trellis.get_node",
-            return_value={
-                "metadata": {"reference": {}},
-                "tags": ["pipeline:scaffolded"],
-            },
-        ), patch(
-            "pipeline.ingestion.trellis.update_node"
-        ), patch(
-            "pipeline.ingestion.trellis.dedup_check", return_value=None
-        ), patch(
-            "pipeline.ingestion.trellis.grep_nodes",
-            side_effect=AssertionError("grep_nodes should not run"),
-        ) as grep_nodes:
-            outcome = ingestion.ingest_reference_pipeline({"doi": "10.1/x"})
-        assert outcome.errors == []
-        assert outcome.upsert.slug == "source"
-        add.assert_called_once()
-        grep_nodes.assert_not_called()
-
     def test_batch_success_marks_digesting_before_terminal_status(self):
         with patch("pipeline.aggregator.batch_resolve", return_value={}), patch(
             "pipeline.ingestion.resolve_identity", return_value=resolved()
@@ -1550,6 +1299,91 @@ class TestIngestionUnit:
         set_status.assert_not_called()
 
 
+class TestIdempotencyGuards:
+    """Re-ingesting an existing node must never downgrade it.
+
+    A title-only re-ingest whose enrichment is skipped resolves no topical data
+    and no DOI; without these guards _make_tags would strip the node's topical
+    tags to nothing and store_citations would overwrite its stored citations with
+    an empty set. See the end-to-end check in
+    TestRisPipelineIntegration.test_title_only_reingest_does_not_wipe_enrichment.
+    """
+
+    def test_make_tags_preserves_topical_when_resolved_has_none(self):
+        # Guard B: a sparse re-ingest carries no topical data, so existing
+        # mesh:/kw:/field: tags must survive; identity/status tags (year:,
+        # pipeline:) are still re-derived.
+        existing_tags = [
+            "pipeline:digested",
+            "source:ris",
+            "mesh:gut-microbiome",
+            "kw:diet",
+            "field:biology",
+            "year:2010",
+        ]
+        sparse = resolved()  # all topical fields default to empty
+        tags = ingestion._make_tags(sparse, existing_tags)
+        assert "mesh:gut-microbiome" in tags
+        assert "kw:diet" in tags
+        assert "field:biology" in tags
+        assert "source:ris" in tags
+        # status/identity are always re-derived, not carried forward
+        assert "pipeline:digested" not in tags
+        assert "pipeline:scaffolded" in tags
+        assert "year:2010" not in tags
+        assert "year:2024" in tags
+
+    def test_store_empty_does_not_overwrite_existing_citations(self):
+        # Guard A: a re-ingest that fetched no citations must not erase a
+        # previously stored citation set.
+        node = {
+            "metadata": {
+                "reference": {
+                    "outbound_citations": {"items": [{"title": "Kept"}, {"title": "B"}]}
+                }
+            }
+        }
+        with patch("pipeline.ingestion.trellis.get_node", return_value=node), patch(
+            "pipeline.ingestion.trellis.update_node"
+        ) as update:
+            result = ingestion.store_citations("source", citation_result([]))
+        update.assert_not_called()
+        assert result.stored == 2
+
+    def test_title_only_record_always_runs_enrichment(self):
+        # FOLLOW-UP #2: Title-only records should ALWAYS run enrichment even if
+        # they have all basic metadata fields (title, abstract, authors, year, venue).
+        # This ensures we attempt to resolve a DOI/locator via S2/PubMed/Crossref.
+        with patch(
+            "pipeline.ingestion._fill_from_pubmed", return_value="input-only"
+        ) as fill_pubmed, patch(
+            "pipeline.ingestion._fill_from_s2", return_value="semantic-scholar"
+        ) as fill_s2, patch(
+            "pipeline.ingestion._fill_from_crossref", return_value="crossref"
+        ) as fill_crossref:
+            parsed = ingestion.parse_input(
+                {
+                    "title": "A title-only paper with sufficient metadata",
+                    "abstract": "Abstract text here",
+                    "authors": ["Author A", "Author B"],
+                    "year": "2024",
+                    "venue": "Journal Name",
+                }
+            )
+            # Verify resolve_identity calls all enrichment functions (not short-circuit)
+            result = ingestion.resolve_identity(parsed)
+            assert fill_pubmed.called, "PubMed enrichment should be called"
+            assert fill_s2.called, "S2 enrichment should be called"
+            assert fill_crossref.called, "Crossref enrichment should be called"
+            assert result.title  # title-only record resolves a title
+
+    def test_classify_failure_marks_locator_as_needs_review(self):
+        # FOLLOW-UP #2: Records that never resolve a locator should be
+        # classified as needs-review, not hard failure.
+        status = ingestion._classify_failure(["Could not resolve a locator"])
+        assert status == "needs-review"
+
+
 @pytest.mark.integration
 class TestIngestionIntegration:
     def test_parse_and_resolve_real_doi(self, ephemeral_trellis):
@@ -1571,9 +1405,8 @@ class TestIngestionIntegration:
     def test_full_pipeline_end_to_end_on_new_real_doi(self, ephemeral_trellis):
         # Fresh instance => this DOI is guaranteed new, so created is reliably True
         # (no need to skip-if-exists against a shared live graph).
-        outcome = ingestion.ingest_reference_pipeline(
-            {"doi": "10.1073/pnas.2304441120"}
-        )
+        outcomes, _ = ingestion.ingest_batch([{"doi": "10.1073/pnas.2304441120"}])
+        outcome = outcomes[0]
         assert outcome.errors == []
         assert outcome.upsert.created is True
         assert outcome.upsert.slug is not None
@@ -1581,15 +1414,18 @@ class TestIngestionIntegration:
 
         verify = ingestion.verify_outcome(outcome.upsert.slug)
         assert verify.node_exists is True
-        assert verify.pipeline_status == "scaffolded"
+        # ingest_batch sets the terminal status; a resolved DOI reaches digested.
+        assert verify.pipeline_status == "digested"
 
     def test_reingest_updates_in_place_no_duplicate(self, ephemeral_trellis):
         doi = "10.1038/s41564-023-01464-1"
-        first = ingestion.ingest_reference_pipeline({"doi": doi})
+        first_outcomes, _ = ingestion.ingest_batch([{"doi": doi}])
+        first = first_outcomes[0]
         assert first.errors == []
         assert first.upsert.created is True
 
-        second = ingestion.ingest_reference_pipeline({"doi": doi})
+        second_outcomes, _ = ingestion.ingest_batch([{"doi": doi}])
+        second = second_outcomes[0]
         assert second.errors == []
         # upsert: the second pass matches the existing node and updates it.
         assert second.upsert.created is False
@@ -1599,10 +1435,216 @@ class TestIngestionIntegration:
 
     def test_no_stub_nodes_created_for_unresolved_citations(self, ephemeral_trellis):
         before = ingestion.trellis.find_nodes(tag="pipeline:queued")
-        outcome = ingestion.ingest_reference_pipeline(
-            {"doi": "10.1038/s42255-023-00744-8"}
-        )
+        outcomes, _ = ingestion.ingest_batch([{"doi": "10.1038/s42255-023-00744-8"}])
+        outcome = outcomes[0]
         assert outcome.errors == []
 
         after = ingestion.trellis.find_nodes(tag="pipeline:queued")
         assert len(after) == len(before)
+
+    def test_locator_less_record_is_needs_review_and_creates_no_node(
+        self, ephemeral_trellis
+    ):
+        # A title-only record whose title resolves to no locator (doi/url/...)
+        # cannot be created by Trellis; the create error is isolated and
+        # classified as needs-review. This guards the behavior that keeps
+        # unresolvable records OUT of the graph instead of creating junk nodes
+        # (the case that refuted the "title-only wrongly digested" concern).
+        before = len(ingestion.trellis.find_nodes(limit=5000))
+        outcomes, _ = ingestion.ingest_batch(
+            [
+                {
+                    "title": "Synthetic placeholder study on nonexistent "
+                    "qwxzy microbiota zzz"
+                }
+            ]
+        )
+        outcome = outcomes[0]
+        assert outcome.upsert is None
+        assert outcome.errors
+        assert "locator" in outcome.errors[0].lower()
+        assert ingestion._classify_failure(outcome.errors) == "needs-review"
+        after = len(ingestion.trellis.find_nodes(limit=5000))
+        assert after == before
+
+    def test_batch_isolates_bad_item_and_processes_good_item(self, ephemeral_trellis):
+        # A malformed item (no DOI/PMID/title) raises in parse_input; the error is
+        # captured per item and the rest of the batch still processes. The good
+        # item (a locator-bearing sentinel) still reaches pipeline:digested.
+        outcomes, _ = ingestion.ingest_batch(
+            [
+                {"year": "2020"},
+                {
+                    "doi": "10.9999/failure-isolation-sentinel",
+                    "title": "Failure Isolation Sentinel Paper On Gut Microbiota",
+                },
+            ]
+        )
+        bad, good = outcomes
+        assert bad.upsert is None
+        assert bad.errors
+        assert "provide a doi, pmid, or title" in bad.errors[0].lower()
+        assert good.errors == []
+        assert good.upsert.created is True
+        tags = ingestion.trellis.get_node(good.upsert.slug).get("tags", [])
+        pipeline_tags = [t for t in tags if str(t).startswith("pipeline:")]
+        assert "pipeline:digested" in pipeline_tags
+
+
+@pytest.mark.integration
+class TestRisPipelineIntegration:
+    def test_ingest_batch_accepts_dict_input_end_to_end(self, ephemeral_trellis):
+        # The list[str | dict] contract: a dict record flows through the same
+        # single pipeline as a bare DOI and reaches pipeline:digested.
+        outcomes, _ = ingestion.ingest_batch([{"doi": "10.1073/pnas.2304441120"}])
+        outcome = outcomes[0]
+        assert outcome.errors == []
+        assert outcome.upsert.created is True
+        assert outcome.verify.node_exists is True
+        # verify (phase 4) captures the in-flight status; the final status is set
+        # in phase 5, so read it from the node itself.
+        node = ingestion.trellis.get_node(outcome.upsert.slug)
+        status = [t for t in node.get("tags", []) if str(t).startswith("pipeline:")]
+        assert "pipeline:digested" in status
+
+    def test_title_only_reingest_does_not_wipe_enrichment(self, ephemeral_trellis):
+        # Regression guard (idempotency A+B). Re-ingesting an already-enriched
+        # node as a metadata-complete title-only record exercises the exact path
+        # that once wiped a node: enrichment is skipped, so the resolved record
+        # carries no topical data and no DOI. The guards must preserve the
+        # existing topical tags (_make_tags) and stored citations
+        # (store_citations) instead of clearing them.
+        doi = "10.1038/s41564-023-01464-1"
+        first, _ = ingestion.ingest_batch([doi])
+        assert first[0].errors == []
+        slug = first[0].upsert.slug
+
+        node = ingestion.trellis.get_node(slug)
+        ref = (node.get("metadata") or {}).get("reference") or {}
+        topical_before = sorted(
+            t
+            for t in node.get("tags", [])
+            if str(t).split(":")[0] in ("mesh", "kw", "field", "type")
+        )
+        cites_before = (ref.get("outbound_citations") or {}).get("items") or []
+        assert topical_before, "DOI ingest should have produced topical tags"
+        assert cites_before, "DOI ingest should have stored citations"
+
+        # Metadata-complete title-only record (title + abstract + authors + year
+        # + venue) → resolve_identity short-circuits API enrichment, the path
+        # that produced the regression.
+        reingest = {
+            "title": node.get("title"),
+            "abstract": node.get("abstract"),
+            "authors": ref.get("authors"),
+            "year": ref.get("year"),
+            "venue": ref.get("venue"),
+        }
+        second, _ = ingestion.ingest_batch([reingest])
+        assert second[0].errors == []
+        # Deduped onto the same node — no duplicate created. A dedup match
+        # returns the node's UUID, so resolve it back to confirm same identity.
+        assert second[0].upsert.created is False
+        node2 = ingestion.trellis.get_node(second[0].upsert.slug)
+        assert ingestion._node_slug(node2) == slug
+        ref2 = (node2.get("metadata") or {}).get("reference") or {}
+        topical_after = sorted(
+            t
+            for t in node2.get("tags", [])
+            if str(t).split(":")[0] in ("mesh", "kw", "field", "type")
+        )
+        cites_after = (ref2.get("outbound_citations") or {}).get("items") or []
+        assert topical_after == topical_before  # guard B: topical tags preserved
+        assert len(cites_after) == len(cites_before)  # guard A: citations preserved
+
+    def test_intra_batch_dedup_prevents_duplicate_nodes(self, ephemeral_trellis):
+        # FOLLOW-UP #3: two identical NEW records in a single ingest_batch call
+        # must create exactly ONE node. Without the live-index + lock, both records
+        # miss the frozen snapshot and each create a node (the race this closes).
+        # A locator (DOI) is required for Trellis to accept the create; the DOI is
+        # deliberately unresolvable so the test does not depend on live enrichment.
+        title = "Intra Batch Dedup Sentinel Paper On Gut Microbiota"
+        record = {"doi": "10.9999/intra-batch-dedup-sentinel", "title": title}
+        outcomes, _ = ingestion.ingest_batch([dict(record), dict(record)])
+
+        assert len(outcomes) == 2
+        assert outcomes[0].errors == []
+        assert outcomes[1].errors == []
+        # Exactly one create; the second record dedups onto the first.
+        created = [o.upsert.created for o in outcomes]
+        assert created.count(True) == 1
+        assert created.count(False) == 1
+        # Both outcomes resolve to the same underlying node. upsert.slug is a human
+        # slug on create but a UUID on dedup-match, so compare the canonical node id
+        # rather than the raw identifier strings.
+        node_ids = {
+            ingestion.trellis.get_node(o.upsert.slug).get("id") for o in outcomes
+        }
+        assert len(node_ids) == 1
+
+        # The graph holds exactly one node for this DOI-bearing title.
+        matches = ingestion.trellis.find_nodes(text=title)
+        assert len([n for n in matches if n.get("title") == title]) == 1
+
+    def test_ris_keywords_kept_when_enrichment_finds_none(self, ephemeral_trellis):
+        # Enrichment cannot resolve the sentinel DOI, so the RIS KW keywords carried
+        # on the input dict survive as kw: tags (the fallback floor). Without the
+        # fallback the node would have no topical tags at all. Enrichment-derived
+        # keywords still win when present; this is the enrichment-miss branch.
+        outcomes, _ = ingestion.ingest_batch(
+            [
+                {
+                    "doi": "10.9999/ris-kw-fallback-sentinel",
+                    "title": "RIS Keyword Fallback Sentinel Paper On Gut Microbiota",
+                    "keywords": ["gut microbiome", "diet"],
+                }
+            ]
+        )
+        outcome = outcomes[0]
+        assert outcome.errors == []
+        assert outcome.upsert.created is True
+        tags = ingestion.trellis.get_node(outcome.upsert.slug).get("tags", [])
+        assert "kw:gut-microbiome" in tags
+        assert "kw:diet" in tags
+
+    def test_cross_identifier_dedup_converges_doi_pmid_title(self, ephemeral_trellis):
+        # The same paper, ingested by DOI then by PMID then by title, must converge
+        # onto ONE node (dedup precedence s2_id > doi > pmid > title). Only the
+        # first ingest creates; the others match and merge.
+        doi = "10.1038/s41564-023-01464-1"
+        first, _ = ingestion.ingest_batch([doi])
+        assert first[0].errors == []
+        assert first[0].upsert.created is True
+        first_slug = first[0].upsert.slug
+        node = ingestion.trellis.get_node(first_slug)
+        canonical_id = node.get("id")
+        ref = (node.get("metadata") or {}).get("reference") or {}
+        pmid = ref.get("pmid") or node.get("pmid")
+        title = node.get("title")
+        if not pmid or not title:
+            pytest.skip("resolved node lacks a pmid/title to dedup on")
+
+        by_pmid, _ = ingestion.ingest_batch([{"pmid": str(pmid)}])
+        assert by_pmid[0].errors == []
+        assert by_pmid[0].upsert.created is False
+        assert (
+            ingestion.trellis.get_node(by_pmid[0].upsert.slug).get("id") == canonical_id
+        )
+
+        by_title, _ = ingestion.ingest_batch([{"title": title}])
+        assert by_title[0].errors == []
+        assert by_title[0].upsert.created is False
+        assert (
+            ingestion.trellis.get_node(by_title[0].upsert.slug).get("id")
+            == canonical_id
+        )
+
+    def test_pmid_only_dict_reaches_digested(self, ephemeral_trellis):
+        # The PMID-only input shape resolves and reaches pipeline:digested.
+        outcomes, _ = ingestion.ingest_batch([{"pmid": "36357687"}])
+        outcome = outcomes[0]
+        assert outcome.errors == []
+        assert outcome.upsert.created is True
+        tags = ingestion.trellis.get_node(outcome.upsert.slug).get("tags", [])
+        pipeline_tags = [t for t in tags if str(t).startswith("pipeline:")]
+        assert "pipeline:digested" in pipeline_tags

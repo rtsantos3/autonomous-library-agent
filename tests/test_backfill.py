@@ -97,7 +97,8 @@ def test_only_missing_skips_already_topical_nodes():
     ingest_batch.assert_called_once_with(["10.1/missing"], workers=2)
 
 
-def test_node_without_doi_is_skipped_and_excluded():
+def test_node_without_doi_or_title_is_skipped_and_excluded():
+    # No locator and no resolvable title: nothing to resolve on, so it is dropped.
     nodes = [node("no-doi", uri=None, metadata={"reference": {}})]
     outcomes, result, ingest_batch, _get_by_status = run_backfill(nodes)
 
@@ -105,6 +106,37 @@ def test_node_without_doi_is_skipped_and_excluded():
     assert result.resolvable == 0
     assert outcomes == []
     ingest_batch.assert_not_called()
+
+
+def test_title_only_node_is_fed_to_ingest_batch_as_dict():
+    # A DOI-less node that still carries a resolvable title is re-fed as a dict
+    # record (via ingest_batch's str|dict contract) rather than skipped, so the
+    # pipeline can resolve a locator from the title. This is what unblocks legacy
+    # title-only scaffold stubs.
+    title_only = {
+        "slug": "title-only-stub",
+        "uri": None,
+        "title": "A Title Only Scaffold Stub On Gut Microbiota",
+        "abstract": "Stored abstract text.",
+        "tags": ["pipeline:scaffolded"],
+        "metadata": {
+            "reference": {"year": "2020", "venue": "Journal", "authors": ["A B"]}
+        },
+    }
+    _outcomes, result, ingest_batch, _get_by_status = run_backfill(
+        [title_only], [make_outcome(linked=1, stored=1)]
+    )
+
+    assert result.skipped_no_doi == 0
+    assert result.resolvable == 1
+    handed = ingest_batch.call_args.args[0]
+    assert len(handed) == 1
+    record = handed[0]
+    assert isinstance(record, dict)
+    assert record["title"] == title_only["title"]
+    assert record["doi"] is None
+    assert record["year"] == "2020"
+    assert record["abstract"] == "Stored abstract text."
 
 
 def test_outcome_errors_are_isolated_and_not_counted_as_processed():
