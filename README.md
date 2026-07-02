@@ -1,14 +1,33 @@
 # autonomous-library-agent
 
-A literature **ingestion pipeline** and **persistent-agent contract** that build and
-maintain a research library as a [Trellis](https://github.com/rtsantos3/Trellis)
-knowledge graph: every paper is a node, every citation is an edge. The pipeline is
-**library-agnostic** — one agent can serve many libraries; each library is just a
-workspace directory the agent is pointed at.
+Turn a pile of papers (DOIs, PMIDs, or an EndNote/RIS export) into a queryable
+**citation-graph knowledge base**. This repo is a literature **ingestion pipeline**
+plus a **persistent-agent contract** that build and maintain that library as a
+[Trellis](https://github.com/rtsantos3/Trellis) knowledge graph — every paper is a
+node, every citation is an edge — so it can seed an offline RAG corpus for
+literature Q&A over what you've actually read.
 
-This repository is the *tooling*. The *data* (a materialized graph) lives in a
+It is **library-agnostic**: one agent can serve many libraries, and a library is
+just a workspace directory the agent is pointed at. The pipeline resolves and
+enriches each paper across Semantic Scholar, PubMed, and Crossref, dedups it,
+upserts a node, and links its citations — idempotently, so it is safe for an
+autonomous agent to re-run unsupervised.
+
+This repository is the **tooling**. The **data** (a materialized graph) lives in a
 separate library repository that includes this one as a submodule — see
 [`rtsantos3/LAD_library`](https://github.com/rtsantos3/LAD_library) for an example.
+
+**New here?** First install the Trellis CLI — it ships as an npm package and that
+is the main download route:
+
+```bash
+npm install -g @rtsantos3/trellis-app     # provides the `trellis` command on PATH
+```
+
+Then run `./setup.sh` (see [Setup](#setup)) to get a working environment and
+hydrate a graph, read [`AGENT-CONTRACT.md`](AGENT-CONTRACT.md) for the agent-facing
+runtime contract, and see the [Ingestion pipeline](#ingestion-pipeline) map below
+for how a paper flows through end to end.
 
 ## What it does
 
