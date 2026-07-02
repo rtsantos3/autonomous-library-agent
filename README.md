@@ -1,17 +1,21 @@
 # autonomous-library-agent
 
-Turn a pile of papers (DOIs, PMIDs, or an EndNote/RIS export) into a queryable
-**citation-graph knowledge base**. This repo is a literature **ingestion pipeline**
-plus a **persistent-agent contract** that build and maintain that library as a
-[Trellis](https://github.com/rtsantos3/Trellis) knowledge graph — every paper is a
-node, every citation is an edge — so it can seed an offline RAG corpus for
-literature Q&A over what you've actually read.
+**What this is:** a tool that turns your collection of papers into a searchable,
+connected knowledge base you can ask research questions against. Point it at a list
+of papers — DOIs, PMIDs, or an EndNote/RIS export — and it looks each one up, fills
+in the details (abstract, authors, journal, topics), removes duplicates, and links
+the papers together by their citations. The result is a map of the literature you've
+collected that you (or an AI assistant) can later query.
 
-It is **library-agnostic**: one agent can serve many libraries, and a library is
-just a workspace directory the agent is pointed at. The pipeline resolves and
-enriches each paper across Semantic Scholar, PubMed, and Crossref, dedups it,
-upserts a node, and links its citations — idempotently, so it is safe for an
-autonomous agent to re-run unsupervised.
+Under the hood it is a literature **ingestion pipeline** plus a **persistent-agent
+contract** that maintain the library as a
+[Trellis](https://github.com/rtsantos3/Trellis) knowledge graph — every paper is a
+*node*, every citation is an *edge*. It is built to seed an offline **RAG** corpus
+(retrieval-augmented generation: an AI that answers from *your* papers rather than
+from guesswork). It is **library-agnostic** — it works for any collection, and a
+library is just a folder the tool is pointed at — resolves and enriches each paper
+across Semantic Scholar, PubMed, and Crossref, and is **idempotent**: safe for an
+autonomous agent to re-run unattended without ever creating duplicates.
 
 This repository is the **tooling**. The **data** (a materialized graph) lives in a
 separate library repository that includes this one as a submodule — see
