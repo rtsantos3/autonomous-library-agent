@@ -35,6 +35,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Legacy single-paper scaffolder scripts (`scaffold_from_endnote.py`,
   `bulk_scaffold.py`, `feed_csv.py`, `ingest.py`, `link_citations.py`) and the
   `test_pipeline_20` benchmark.
+- Root-level dev/planning clutter: `SYSTEM_PROMPT.md` (superseded by
+  `AGENT-CONTRACT.md`), `HANDOFF.md`, the `01`–`04` design docs, `plans/`,
+  `docs/journal_log.md`, and `seed.py` (superseded by
+  `scripts/import_ris_network.py`).
 
 ### Fixed
 - RIS keywords are no longer dropped unconditionally. `parse_input` now accepts a
