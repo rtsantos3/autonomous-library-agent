@@ -180,6 +180,88 @@ Both forms normalize through `parse_input` — there is no separate code path fo
 DOI-less records. A dict that carries a DOI still joins the Semantic Scholar
 batch prefetch; a title-only dict skips the prefetch and is enriched per-paper.
 
+### Calling `ingest_batch` — recipes & edge cases
+
+`ingest_batch` always takes a **list**; "singular" is just a list of length 1.
+The list may mix strings and dicts freely. Every recipe below returns
+`(outcomes, metrics)`; index `outcomes[i]` corresponds to `items[i]`.
+
+```python
+from pipeline.ingestion import ingest_batch
+
+# 1) SINGLE paper by DOI (bare string == {"doi": ...})
+outcome = ingest_batch(["10.1038/nature11234"])[0]
+
+# 1b) SINGLE paper, same thing via the CLI (thin wrapper over the above)
+#     python -m pipeline.ingestion --doi 10.1038/nature11234
+#     python -m pipeline.ingestion --pmid 23023125
+#     python -m pipeline.ingestion --title "Diversity of the human intestinal microbial flora"
+
+# 2) SINGLE paper as a dict (when you already have metadata — skips a lookup)
+outcome = ingest_batch([{
+    "doi": "10.1038/nature11234",
+    "title": "Diversity of the human intestinal microbial flora",
+    "abstract": "...", "authors": ["Eckburg PB", "Bik EM"],
+    "year": "2005", "venue": "Nature",
+}])[0]
+
+# 3) MANY papers, mixed str + dict in one call (they share one S2 batch prefetch)
+outcomes, metrics = ingest_batch([
+    "10.1038/nature11234",                 # bare DOI
+    {"pmid": "23023125"},                  # PMID-only dict
+    {"title": "A title only record on gut microbiota", "year": "2019"},
+])
+
+# 4) TITLE-ONLY / DOI-less (e.g. an RIS entry with no identifier).
+#    Legal as long as the title is >= 10 chars. Skips the DOI prefetch;
+#    resolve_identity tries PubMed/S2/Crossref to recover a locator.
+outcome = ingest_batch([{"title": "Gut microbiota composition in colitis"}])[0]
+
+# 5) PARTIAL / sparse dict — missing fields are fine; enrichment fills them.
+#    Only the "at least one of DOI / PMID / >=10-char title" rule is enforced.
+outcome = ingest_batch([{"pmid": "23023125"}])[0]   # everything else resolved
+```
+
+**Validation & failure isolation** (from `parse_input` + `resolve_and_upsert`):
+
+- A dict with **no DOI, no PMID, and no title ≥ 10 chars** raises
+  `ValueError("Provide a DOI, PMID, or title of at least 10 characters")`.
+  The error is **caught per item** — it lands in `outcomes[i].errors` and that
+  item is skipped; the rest of the batch still processes. One bad record never
+  aborts the batch.
+- `authors` may be a `list` **or** a `;`-separated string
+  (`"Eckburg PB; Bik EM"`), normalized either way.
+- A `year` given as `int` is coerced to `str`.
+- **Duplicates within one batch** (two items resolving to the same paper)
+  converge onto a single node — the second upsert merges, guarded by the
+  intra-batch `node_lock` live-index re-check. Same for **re-ingesting a paper
+  already in the graph**: dedup finds it → merge, never a duplicate node.
+- **RIS files** are not passed to `ingest_batch` directly — run
+  `python scripts/import_ris_network.py <file-or-dir>.ris`, which parses each
+  record into a dict (DOI-bearing → `{"doi": ...}`; identifier-less →
+  title-only dict) and hands the list to `ingest_batch`. `--dry-run` parses and
+  reports without writing.
+
+**Reading an outcome** — `outcomes[i]` is an `IngestionOutcome`:
+
+```python
+o = outcomes[0]
+o.upsert.slug        # Trellis slug of the node
+o.upsert.created     # True = new node, False = merged onto an existing one
+o.link.linked        # citation edges materialized this run
+o.citation_store.stored
+o.errors             # [] on success; per-item messages otherwise
+
+# FINAL pipeline status is derived from o.errors, NOT read from o.verify:
+#   digested   if not o.errors
+#   else needs-review | failed  (via _classify_failure(o.errors))
+# o.verify.pipeline_status is a *mid-pipeline* snapshot taken in phase 4,
+# BEFORE phase 5 writes the final tag — do not use it as the final status.
+# To read the committed final status, re-fetch the node tag after the batch.
+from pipeline.ingestion import _classify_failure
+final = "digested" if not o.errors else _classify_failure(o.errors)
+```
+
 ### Phase sequence (per batch)
 
 | Phase | Function | What it does |
