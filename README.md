@@ -100,7 +100,9 @@ reads `TRELLIS_WORKSPACE` from `.env`). `scripts/monitor.py` currently honours o
 the `TRELLIS_WORKSPACE` env var, not `config.yml`.
 
 Secrets (API keys) live only in `.env` (gitignored). Non-secret tuneables live in
-`config.yml` (gitignored; `config.yml.example` is tracked).
+`config.yml` (gitignored). Tracked fill-in-the-blank templates for both live in
+`templates/` (`templates/.env.example`, `templates/config.yml.example`); `setup.sh`
+copies them into place.
 
 ## Ingestion pipeline
 

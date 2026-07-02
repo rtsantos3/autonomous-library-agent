@@ -2,8 +2,8 @@
 .env
 
 # Local tuneable settings (machine-specific workspace path). Tracked template is
-# config.yml.example; setup.sh creates config.yml from it. Anchored so it never
-# matches .trellis/config.yml (Trellis workspace metadata, which stays tracked).
+# templates/config.yml.example; setup.sh creates config.yml from it. Anchored so
+# it never matches .trellis/config.yml (Trellis workspace metadata, stays tracked).
 /config.yml
 
 # Local library data — never committed
