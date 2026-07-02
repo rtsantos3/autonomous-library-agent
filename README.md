@@ -64,6 +64,7 @@ scripts/
   export_graph.sh slim JSONL snapshot of the graph (mutation_log stripped)
   monitor.py      live pipeline-status dashboard
   migrations/     one-time data-repair migrations (dry-run by default)
+  benchmarks/     interconnected-batch timing harnesses (dev-only)
 ```
 
 The pipeline **shells out to the `trellis` CLI** for all graph writes; Trellis (a
@@ -178,13 +179,14 @@ See `AGENT-CONTRACT.md` → *Ingestion Pipeline* for the agent-facing contract.
 ./setup.sh
 ```
 
-`setup.sh` is idempotent and safe to re-run. It creates a conda prefix env at
-`./setup`, creates `.env` and `config.yml` (prompting once for the workspace,
+`setup.sh` is idempotent and safe to re-run. It creates a named conda env
+`autonomous-library-agent` (from `environment.yml`; never recreated if it already
+exists), creates `.env` and `config.yml` (prompting once for the workspace,
 defaulting to the parent directory), verifies the `trellis` CLI and `git-lfs`, hydrates
 the graph from a committed export if one exists, and runs the offline test suite.
 
 Then edit `.env` with your keys (`NCBI_API_KEY`, `S2_API_KEY`, `CROSSREF_EMAIL`,
-`UNPAYWALL_EMAIL`) and activate the env (`conda activate ./setup`).
+`UNPAYWALL_EMAIL`) and activate the env (`conda activate autonomous-library-agent`).
 
 ## Usage
 
