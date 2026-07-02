@@ -6,7 +6,7 @@
 # will NOT overwrite an existing .env. Steps:
 #   1. verify conda is available
 #   2. create the named conda env 'autonomous-library-agent' from environment.yml (only if absent)
-#   3. create .env from .env.example (only if absent)
+#   3. create .env from templates/.env.example (only if absent)
 #   4. verify the `trellis` CLI is on PATH (verify-only; does not install it)
 #   5. report the resolved Trellis workspace and whether it is initialized
 #   6. run the offline test suite as a smoke check
@@ -46,8 +46,8 @@ say "Setting up .env"
 if [ -f .env ]; then
   ok ".env already exists (left untouched)"
 else
-  cp .env.example .env
-  warn "created .env from .env.example — edit it and fill in your API keys"
+  cp templates/.env.example .env
+  warn "created .env from templates/.env.example — edit it and fill in your API keys"
 fi
 
 # 3b. config.yml + Trellis workspace (prompt once) -----------------------------
@@ -57,8 +57,8 @@ fi
 say "Setting up config.yml"
 CFG="$REPO_ROOT/config.yml"
 if [ ! -f "$CFG" ]; then
-  cp config.yml.example "$CFG"
-  ok "created config.yml from config.yml.example"
+  cp templates/config.yml.example "$CFG"
+  ok "created config.yml from templates/config.yml.example"
 fi
 CONFIG_WS="$(sed -nE 's/^workspace:[[:space:]]*"?([^"]*)"?[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | head -1 || true)"
 if [ -n "$CONFIG_WS" ]; then
