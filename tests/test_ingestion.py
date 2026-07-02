@@ -1442,6 +1442,54 @@ class TestIngestionIntegration:
         after = ingestion.trellis.find_nodes(tag="pipeline:queued")
         assert len(after) == len(before)
 
+    def test_locator_less_record_is_needs_review_and_creates_no_node(
+        self, ephemeral_trellis
+    ):
+        # A title-only record whose title resolves to no locator (doi/url/...)
+        # cannot be created by Trellis; the create error is isolated and
+        # classified as needs-review. This guards the behavior that keeps
+        # unresolvable records OUT of the graph instead of creating junk nodes
+        # (the case that refuted the "title-only wrongly digested" concern).
+        before = len(ingestion.trellis.find_nodes(limit=5000))
+        outcomes, _ = ingestion.ingest_batch(
+            [
+                {
+                    "title": "Synthetic placeholder study on nonexistent "
+                    "qwxzy microbiota zzz"
+                }
+            ]
+        )
+        outcome = outcomes[0]
+        assert outcome.upsert is None
+        assert outcome.errors
+        assert "locator" in outcome.errors[0].lower()
+        assert ingestion._classify_failure(outcome.errors) == "needs-review"
+        after = len(ingestion.trellis.find_nodes(limit=5000))
+        assert after == before
+
+    def test_batch_isolates_bad_item_and_processes_good_item(self, ephemeral_trellis):
+        # A malformed item (no DOI/PMID/title) raises in parse_input; the error is
+        # captured per item and the rest of the batch still processes. The good
+        # item (a locator-bearing sentinel) still reaches pipeline:digested.
+        outcomes, _ = ingestion.ingest_batch(
+            [
+                {"year": "2020"},
+                {
+                    "doi": "10.9999/failure-isolation-sentinel",
+                    "title": "Failure Isolation Sentinel Paper On Gut Microbiota",
+                },
+            ]
+        )
+        bad, good = outcomes
+        assert bad.upsert is None
+        assert bad.errors
+        assert "provide a doi, pmid, or title" in bad.errors[0].lower()
+        assert good.errors == []
+        assert good.upsert.created is True
+        tags = ingestion.trellis.get_node(good.upsert.slug).get("tags", [])
+        pipeline_tags = [t for t in tags if str(t).startswith("pipeline:")]
+        assert "pipeline:digested" in pipeline_tags
+
 
 @pytest.mark.integration
 class TestRisPipelineIntegration:
@@ -1537,3 +1585,66 @@ class TestRisPipelineIntegration:
         # The graph holds exactly one node for this DOI-bearing title.
         matches = ingestion.trellis.find_nodes(text=title)
         assert len([n for n in matches if n.get("title") == title]) == 1
+
+    def test_ris_keywords_kept_when_enrichment_finds_none(self, ephemeral_trellis):
+        # Enrichment cannot resolve the sentinel DOI, so the RIS KW keywords carried
+        # on the input dict survive as kw: tags (the fallback floor). Without the
+        # fallback the node would have no topical tags at all. Enrichment-derived
+        # keywords still win when present; this is the enrichment-miss branch.
+        outcomes, _ = ingestion.ingest_batch(
+            [
+                {
+                    "doi": "10.9999/ris-kw-fallback-sentinel",
+                    "title": "RIS Keyword Fallback Sentinel Paper On Gut Microbiota",
+                    "keywords": ["gut microbiome", "diet"],
+                }
+            ]
+        )
+        outcome = outcomes[0]
+        assert outcome.errors == []
+        assert outcome.upsert.created is True
+        tags = ingestion.trellis.get_node(outcome.upsert.slug).get("tags", [])
+        assert "kw:gut-microbiome" in tags
+        assert "kw:diet" in tags
+
+    def test_cross_identifier_dedup_converges_doi_pmid_title(self, ephemeral_trellis):
+        # The same paper, ingested by DOI then by PMID then by title, must converge
+        # onto ONE node (dedup precedence s2_id > doi > pmid > title). Only the
+        # first ingest creates; the others match and merge.
+        doi = "10.1038/s41564-023-01464-1"
+        first, _ = ingestion.ingest_batch([doi])
+        assert first[0].errors == []
+        assert first[0].upsert.created is True
+        first_slug = first[0].upsert.slug
+        node = ingestion.trellis.get_node(first_slug)
+        canonical_id = node.get("id")
+        ref = (node.get("metadata") or {}).get("reference") or {}
+        pmid = ref.get("pmid") or node.get("pmid")
+        title = node.get("title")
+        if not pmid or not title:
+            pytest.skip("resolved node lacks a pmid/title to dedup on")
+
+        by_pmid, _ = ingestion.ingest_batch([{"pmid": str(pmid)}])
+        assert by_pmid[0].errors == []
+        assert by_pmid[0].upsert.created is False
+        assert (
+            ingestion.trellis.get_node(by_pmid[0].upsert.slug).get("id") == canonical_id
+        )
+
+        by_title, _ = ingestion.ingest_batch([{"title": title}])
+        assert by_title[0].errors == []
+        assert by_title[0].upsert.created is False
+        assert (
+            ingestion.trellis.get_node(by_title[0].upsert.slug).get("id")
+            == canonical_id
+        )
+
+    def test_pmid_only_dict_reaches_digested(self, ephemeral_trellis):
+        # The PMID-only input shape resolves and reaches pipeline:digested.
+        outcomes, _ = ingestion.ingest_batch([{"pmid": "36357687"}])
+        outcome = outcomes[0]
+        assert outcome.errors == []
+        assert outcome.upsert.created is True
+        tags = ingestion.trellis.get_node(outcome.upsert.slug).get("tags", [])
+        pipeline_tags = [t for t in tags if str(t).startswith("pipeline:")]
+        assert "pipeline:digested" in pipeline_tags

@@ -53,4 +53,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   dedup-merged); cross-identifier dedup converged DOI/PMID/title onto one node;
   one malformed record errored in isolation without aborting its batch; repeated
   re-ingest added no duplicate edges (idempotent).
-- Offline suite: 221 passed, 8 skipped.
+- Integration suite (`-m integration`, isolated `ephemeral_trellis` workspace)
+  extended to cover: locator-less record → needs-review (no node created),
+  per-item failure isolation in a mixed batch, RIS-keyword fallback on an
+  enrichment miss, cross-identifier dedup convergence (DOI/PMID/title → one
+  node), and the PMID-only input shape.
+- Offline suite: 225 passed, 13 skipped (integration tests skipped by default).
