@@ -60,10 +60,11 @@ class RisRecord:
 
     def to_input(self) -> dict:
         """
-        Project the parsed record into the pipeline's raw-input dict. Topical
-        fields (keywords) are intentionally omitted: the pipeline re-derives
-        kw:/mesh:/field: tags from the freshly resolved record, so passing
-        source-side keywords would only be discarded downstream.
+        Project the parsed record into the pipeline's raw-input dict. RIS KW
+        keywords are passed as a fallback floor: enrichment-derived kw:/mesh:/
+        field: tags always win, but resolve_identity keeps these source-side
+        keywords when enrichment resolves none (e.g. a record not found in
+        PubMed/S2), so an enrichment-miss node is not left with no topical tags.
         """
         record = {"title": self.title}
         if self.doi:
@@ -76,6 +77,8 @@ class RisRecord:
             record["venue"] = self.venue
         if self.authors:
             record["authors"] = self.authors
+        if self.keywords:
+            record["keywords"] = self.keywords
         return record
 
 

@@ -339,6 +339,62 @@ class TestIngestionUnit:
         assert result.authors == ["Author A"]
         assert result.s2_id == "s2-complete-doi"
 
+    def test_resolve_keywords_fallback_to_source_when_enrichment_finds_none(self):
+        # A record enrichment cannot find (no keywords from PubMed/S2/Crossref)
+        # keeps its source-side RIS KW keywords instead of being left with none.
+        parsed = ParseResult(
+            "A title only record on gut microbiota",
+            None,
+            None,
+            None,
+            [],
+            None,
+            None,
+            keywords=["gut microbiome", "diet"],
+        )
+        with patch(
+            "pipeline.ingestion._fill_from_pubmed",
+            side_effect=lambda parsed, fields: fields["source"],
+        ), patch(
+            "pipeline.ingestion._fill_from_s2",
+            side_effect=lambda fields: fields["source"],
+        ), patch(
+            "pipeline.ingestion._fill_from_crossref",
+            side_effect=lambda fields: fields["source"],
+        ):
+            result = ingestion.resolve_identity(parsed)
+        assert result.keywords == ["gut microbiome", "diet"]
+
+    def test_resolve_enrichment_keywords_win_over_source_keywords(self):
+        # When enrichment resolves its own keywords, those win and the source-side
+        # RIS keywords are dropped (the fallback applies only to the miss case).
+        parsed = ParseResult(
+            "A title only record on gut microbiota",
+            None,
+            None,
+            None,
+            [],
+            None,
+            None,
+            keywords=["ris-native-kw"],
+        )
+
+        def enrich_with_keywords(parsed, fields):
+            fields["keywords"] = ["enriched-kw"]
+            return fields["source"]
+
+        with patch(
+            "pipeline.ingestion._fill_from_pubmed", side_effect=enrich_with_keywords
+        ), patch(
+            "pipeline.ingestion._fill_from_s2",
+            side_effect=lambda fields: fields["source"],
+        ), patch(
+            "pipeline.ingestion._fill_from_crossref",
+            side_effect=lambda fields: fields["source"],
+        ):
+            result = ingestion.resolve_identity(parsed)
+        assert result.keywords == ["enriched-kw"]
+
     def test_resolve_with_prefetched_seeds_from_batch_and_skips_esearch(self):
         parsed = ParseResult(None, "10.1/x", None, None, [], None, None)
         prefetched = BatchResolved(

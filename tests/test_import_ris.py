@@ -7,6 +7,25 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMPORTER = REPO_ROOT / "scripts" / "import_ris_network.py"
 
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from import_ris_network import RisRecord  # noqa: E402
+
+
+def test_to_input_passes_ris_keywords_as_fallback_floor():
+    # RIS KW values ride along in the input dict so resolve_identity can keep
+    # them when enrichment resolves no keywords of its own.
+    record = RisRecord(
+        title="A Title Only Paper On Gut Microbiota",
+        keywords=["gut microbiome", "diet"],
+    )
+    assert record.to_input()["keywords"] == ["gut microbiome", "diet"]
+
+
+def test_to_input_omits_keywords_when_absent():
+    record = RisRecord(title="A Paper With No Keywords At All Here")
+    assert "keywords" not in record.to_input()
+
+
 # Two identical entries (same DOI) plus one unique entry. EndNote RIS exports
 # routinely repeat records; the importer must collapse them before ingest so the
 # pipeline does not create twin nodes for the same paper.

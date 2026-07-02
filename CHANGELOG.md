@@ -37,6 +37,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `test_pipeline_20` benchmark.
 
 ### Fixed
+- RIS keywords are no longer dropped unconditionally. `parse_input` now accepts a
+  `keywords` field and `resolve_identity` keeps source-side RIS `KW` as a
+  fallback floor when enrichment resolves no keywords of its own — enrichment
+  keywords still win when present, so only enrichment-miss records are affected
+  (previously they were left with no `kw:` tags).
 - AGENT-CONTRACT: `o.verify.pipeline_status` is a phase-4 (pre-final) snapshot,
   not the committed status; documented that final status is derived from
   `o.errors` (`digested`, else `_classify_failure`).

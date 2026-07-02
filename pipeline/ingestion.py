@@ -92,6 +92,9 @@ class ParseResult:
     authors: list
     year: Optional[str]
     venue: Optional[str]
+    # Source-side topical keywords (e.g. RIS KW). Used only as a fallback floor
+    # when enrichment resolves no keywords of its own — see resolve_identity.
+    keywords: list = field(default_factory=list)
 
 
 @dataclass
@@ -332,9 +335,12 @@ def parse_input(raw: dict) -> ParseResult:
     authors = raw.get("authors") or []
     year = _blank_to_none(raw.get("year"))
     venue = _blank_to_none(raw.get("venue"))
+    keywords = raw.get("keywords") or []
 
     if isinstance(authors, str):
         authors = [a.strip() for a in authors.split(";") if a.strip()]
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(";") if k.strip()]
 
     if not doi and not pmid and not (title and len(title.strip()) >= 10):
         raise ValueError("Provide a DOI, PMID, or title of at least 10 characters")
@@ -347,6 +353,7 @@ def parse_input(raw: dict) -> ParseResult:
         authors=authors,
         year=str(year) if year is not None else None,
         venue=venue,
+        keywords=keywords,
     )
 
 
@@ -786,6 +793,13 @@ def resolve_identity(
         fields["source"] = _fill_from_s2(fields)
         if not parsed.doi or not _blank_to_none(fields.get("title")):
             fields["source"] = _fill_from_crossref(fields)
+
+    # Fallback floor: if enrichment resolved no keywords, keep the source-side
+    # keywords (e.g. RIS KW) so a record enrichment cannot find is not left with
+    # none. Enrichment-derived keywords always win when present, so this only
+    # applies to the enrichment-miss case.
+    if not fields.get("keywords") and parsed.keywords:
+        fields["keywords"] = list(parsed.keywords)
 
     title = _blank_to_none(fields.get("title"))
     if not title:
