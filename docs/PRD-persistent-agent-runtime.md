@@ -232,6 +232,51 @@ line** so the change can be committed back to the KG library repo.
   `needs-review` count, `dead-letter` count, per-feed health (last success), and
   pending backlog. Bulletin *delivery* is the messenger layer's concern.
 
+### R12 — Tunables (configuration)
+Runtime behavior is configurable **per KG**. The infra ships defaults; each KG
+overrides in `<library-repo>/config/agent_tuning.yml` (place-specific, §3). Any
+unset key falls back to the infra default. Previously hard-coded values (retry
+cap, stale window, drain workers, cadence) are all tunables.
+
+| Knob | Default | Controls | Req |
+|------|---------|----------|-----|
+| `rss.scan_cron` | `0 7 * * *` (daily 07:00) | discovery cadence | R5.1 |
+| `rss.catchup_window_days` | 30 | first-run / max lookback | R5.4 |
+| `rss.max_candidates_per_digest` | 25 | digest size cap | R11.2 |
+| `notifications.digest` | `daily` | **how often new-paper digests post** (`daily` \| `2x-daily` \| `weekly` \| `off`) | R11.2 |
+| `notifications.digest_time` | `08:00` | when the daily digest posts | R11.2 |
+| `notifications.max_per_day` | 3 | cap on pings per day | R8 |
+| `notifications.quiet_hours` | `22:00–07:00` | suppress pings in this window | R8 |
+| `notifications.weekly_bulletin` | `mon 09:00` | rollup cadence (or `off`) | R11.3 |
+| `ingestion.drain_workers` | 3 | burst cap (≤ NCBI limit) | R5.6 |
+| `ingestion.retry_cap` | 3 | fails → dead-letter | R6.2 |
+| `gate.auto_approve_topics` | `[]` | topics that skip the approval gate | R5.2 |
+| `housekeeping.stale_after_days` | 14 | `pending → stale` | R5.7 |
+
+```yaml
+# <library-repo>/config/agent_tuning.yml  — per-KG overrides; omit a key to keep the default
+rss:
+  scan_cron: "0 7 * * *"
+  catchup_window_days: 30
+  max_candidates_per_digest: 25
+notifications:
+  digest: daily            # daily | 2x-daily | weekly | off
+  digest_time: "08:00"
+  max_per_day: 3
+  quiet_hours: ["22:00", "07:00"]
+  weekly_bulletin: "mon 09:00"
+ingestion:
+  drain_workers: 3
+  retry_cap: 3
+gate:
+  auto_approve_topics: []
+housekeeping:
+  stale_after_days: 14
+```
+
+The infra reads this via the same resolution precedence as other config
+(env > config file > default) and validates unknown keys (warn, ignore).
+
 ---
 
 ## 5. Node schemas
@@ -364,6 +409,7 @@ Conventions: run in the Docker env; fixtures committed (deterministic); logs →
 | — | Burst | Drain workers ≤ NCBI limit |
 | — | Stale pending | `rss:pending → rss:stale` (kept, no re-nag, not lost) |
 | — | Observability | Runtime logs + daily and weekly bulletins |
+| — | Tunables | Per-KG `config/agent_tuning.yml` (cadence, notify frequency, retry cap, stale window, workers); infra defaults |
 
 ---
 
@@ -388,7 +434,9 @@ Conventions: run in the Docker env; fixtures committed (deterministic); logs →
 - Edits to each KG's `AGENT-CONTRACT.md` (Hooks section; per KG, in the library
   repo).
 - One CI guard test for the Prime Directive (R3.4).
-- Per-KG YAML (`config/rss_feeds.yml`, `kg_id`, profile) in the library repo.
+- Per-KG YAML in the library repo: `config/rss_feeds.yml`, `config/agent_tuning.yml`
+  (R12), `kg_id`, profile.
+- A config loader for `agent_tuning.yml` (defaults + override resolution).
 - The Slack delivery layer — see `docs/messenger-integration.md`.
 
 No changes to `pipeline/ingestion.py`.
