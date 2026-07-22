@@ -172,25 +172,41 @@ delivery is the Slack layer's concern (see `docs/messenger-integration.md`).
 
 | Hook (trigger) | Channel | Action |
 |----------------|---------|--------|
-| `watch <topic> "<terms>"` | `#<kg>-agent` | build the eutils `esearch` URL from the terms; find-or-create the `watch:<topic>` node; append to `metadata.feeds` (dedup); init `last_run`; confirm |
-| `add-feed <topic> <url>` | `#<kg>-agent` | validate it is an eutils/`esearch` URL; append to the topic's `metadata.feeds` |
+| `add-feed <topic> <url>` | `#<kg>-agent` | **manual**: `<url>` is a PubMed RSS feed URL the user obtained via PubMed's *Create RSS* (see *Finding & adding feeds* below). Validate the URL; find-or-create the `watch:<topic>` node; append to `metadata.feeds` (dedup); init `last_run`; confirm |
 | `remove-feed <topic> [url]` | `#<kg>-agent` | remove a feed URL, or the whole topic if none given |
 | `scan now <topic>` | `#<kg>-agent` | run RSS discovery for that topic immediately; post the resulting digest |
 | ✅ / `approve <slug\|all>` | `#<kg>-rss-digest` | flip candidate `rss:pending → rss:approved`; drain it via `ingest_batch` |
 | ❌ / `reject <slug>` | `#<kg>-rss-digest` | tombstone `declined:<id>`; delete the candidate |
 | paper id / RIS posted | `#<kg>-add-paper` | `ingest_batch([id])` directly (explicit intent, no gate); reply with the slug |
 
-**Adding a search tag through the agent** is the `watch` / `add-feed` hook: the
-`<topic>` you name becomes the `topic:<slug>` tag stamped on every candidate and
-every paper later ingested from that feed — so one command sets both the *search*
-and the *filter tag* (`trellis find --tag topic:<slug>`). Adding a term that is
-already present is a no-op (the `metadata.feeds` list dedups).
+**Adding a feed is manual.** The user finds the search on PubMed and supplies its
+RSS URL; the agent never builds queries from free-text. The `<topic>` you name
+becomes the `topic:<slug>` tag stamped on every candidate and every paper later
+ingested from that feed (`trellis find --tag topic:<slug>`). Adding a URL already
+present is a no-op (the `metadata.feeds` list dedups).
 
 **Reproducibility.** A feed mutation updates the runtime `watch` node (the source
 of truth) immediately; the agent also emits the corresponding
 `config/rss_feeds.yml` line so the change can be committed back to the KG library
 repo. See the runtime PRD (R5/R9) and `docs/messenger-integration.md` for the
 Slack delivery.
+
+### Finding & adding feeds (manual)
+
+Feeds are added by hand — the agent does not construct PubMed queries. To add one:
+
+1. On **pubmed.ncbi.nlm.nih.gov**, run the search. Prefer precise syntax: MeSH
+   terms (`"Gastrointestinal Microbiome"[MeSH]`), field tags (`[tiab]`, `[au]`,
+   `[ta]`), and boolean grouping (`AND` / `OR` / `NOT`).
+2. Click **Create RSS** (under the search bar) → copy the generated **feed URL**.
+3. Add it: `add-feed <topic> <url>`.
+4. Verify with `scan now <topic>` — runs discovery immediately and posts the
+   digest, so a noisy search can be caught and `remove-feed`'d before it becomes a
+   daily feed.
+
+Any RSS URL works (journal feeds, bioRxiv/medRxiv subject feeds), but PubMed
+*Create RSS* is the default because its query is re-runnable for date-windowed
+catch-up (R5.4).
 
 ---
 

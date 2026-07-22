@@ -200,19 +200,23 @@ Every hook runs the R1.3 fail-closed workspace assert before any write, and mint
 - `approve <slug|all>` — approve candidate(s); the agent drains via `ingest_batch`
   (R5.5).
 - `reject <slug>` — decline a candidate; writes a tombstone (R6).
-- `watch <topic> "<terms>"` — build the eutils query from terms, find-or-create
-  the watch node, append the feed (dedup), init `last_run`.
-- `add-feed <topic> <url>` — validate + append a raw eutils feed URL.
+- `add-feed <topic> <url>` — **manual**: `<url>` is a PubMed RSS feed URL the user
+  obtained via PubMed's *Create RSS*. Validate it, find-or-create the watch node,
+  append the feed (dedup), init `last_run`. The agent does **not** build queries
+  from free text; feeds are added by hand (see the contract's *Finding & adding
+  feeds*).
 - `remove-feed <topic> [url]` — remove a feed URL, or the whole topic.
 - `scan now <topic>` — run RSS discovery for a topic immediately.
 - `status` — queue / needs-review / dead-letter / pending counts.
 - `retry <slug>` — force a dead-lettered node back into processing.
 
-**Adding a search tag through the agent** is the `watch` / `add-feed` hook: the
-`<topic>` becomes the `topic:<slug>` filter tag stamped on every candidate and
-every paper later ingested from that feed. Feed mutations update the runtime
-`watch` node (source of truth) and **emit the corresponding `config/rss_feeds.yml`
-line** so the change can be committed back to the KG library repo.
+**Adding a search tag through the agent** is the manual `add-feed` hook: the user
+supplies a PubMed RSS URL and the `<topic>` becomes the `topic:<slug>` filter tag
+stamped on every candidate and every paper later ingested from that feed. Feed
+mutations update the runtime `watch` node (source of truth) and **emit the
+corresponding `config/rss_feeds.yml` line** so the change can be committed back to
+the KG library repo. The agent never builds queries from free text (see the
+contract's *Finding & adding feeds*).
 
 ### R10 — Contract versioning
 - **R10.1** Each KG's `AGENT-CONTRACT.md` carries a header with
