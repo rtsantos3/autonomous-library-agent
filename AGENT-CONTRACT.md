@@ -15,7 +15,7 @@ You operate in exactly two modes. Determine which mode applies from context at s
 Run continuously. Each cycle (max 50 nodes per cycle):
 
 #### Phase A — Startup Check
-1. `trellis find --tag pipeline:digesting --json` → if any results, set them to `pipeline:failed` and notify user via Telegram ("stale digesting nodes found: [slugs]").
+1. `trellis find --tag pipeline:digesting --json` → if any results, set them to `pipeline:failed` and notify user via Slack ("stale digesting nodes found: [slugs]").
 
 #### Phase B — Ingestion (canonical pipeline)
 
@@ -35,7 +35,16 @@ citations, and sets final status in one pass.
 Inbound/outbound citation linking and dedup are handled inside the pipeline;
 there is no separate citation-expansion or hop-tracking step to run by hand.
 
-#### Phase C — Digestion (process scaffolded nodes)
+#### Phase C — Full-text extraction (USER-PROMPTED, on-demand — NOT autonomous)
+
+> **Not part of the automated pipeline.** Digestion ends at `pipeline:digested`
+> (resolve → enrich → dedup → link). The full-text extraction below (findings /
+> hypotheses / methods via Marker / Nougat) is **never run automatically** — it
+> executes **only when a user explicitly prompts it** for a specific paper (an
+> on-demand action, e.g. a `digest <slug>` request). The autonomous loop **skips
+> this phase entirely**. Query Mode is grounded in abstracts + citation structure,
+> not `vault/<slug>/full_text.md`.
+
 1. `trellis find --tag pipeline:scaffolded --json` → get list of scaffolded nodes.
 2. For each node:
    a. Claim: `trellis update <slug> --tags "pipeline:digesting"`.
@@ -106,7 +115,7 @@ there is no separate citation-expansion or hop-tracking step to run by hand.
 
 #### Phase E — Review Notifier
 1. `trellis find --tag pipeline:needs-review --json`.
-2. If results: send Telegram notification with slugs and uncertain findings.
+2. If results: send Slack notification with slugs and uncertain findings.
 
 #### Phase F — Sleep
 Sleep 5 minutes. Repeat from Phase B.
@@ -135,7 +144,7 @@ Triggered by `research <topic>` from the user.
 5. Run ingestion loop: scaffold → fetch citation graph → expand citations (max 2 hops).
 6. Run digestion loop: full text → extract → verify → write `vault/` + `references/`.
 7. Cross-link new findings to existing graph (`supports` / `contradicts` edges).
-8. Report back via Telegram as bullet summary with Trellis slug citations.
+8. Report back via Slack as bullet summary with Trellis slug citations.
 
 Send progress updates at each major milestone:
 - "Found N new papers on X, ingesting..."
@@ -147,7 +156,7 @@ Send progress updates at each major milestone:
 Runs as part of the autonomous loop. On each cycle:
 
 1. Query `trellis find --tag pipeline:needs-review --json`.
-2. If results found, send a Telegram notification listing the slugs and the uncertain findings for manual review.
+2. If results found, send a Slack notification listing the slugs and the uncertain findings for manual review.
 
 ---
 
@@ -483,7 +492,7 @@ Use `--json` on find commands when parsing output programmatically.
 ### Prompt Templates
 - `prompts/extract.md` — extraction prompt. Substitute `{{paper_text}}`. Returns JSON with findings, hypotheses, methods, concepts, datasets, gaps.
 - `prompts/verify.md` — verification prompt. Substitute `{{extracted_items}}`. Returns JSON with confirmed/uncertain/rejected verdicts.
-- `prompts/research_report.md` — report prompt. Substitute `{{topic}}`, `{{confirmed_findings}}`, `{{uncertain_findings}}`, `{{gaps}}`. Returns Telegram-ready bullet summary.
+- `prompts/research_report.md` — report prompt. Substitute `{{topic}}`, `{{confirmed_findings}}`, `{{uncertain_findings}}`, `{{gaps}}`. Returns Slack-ready bullet summary.
 
 ### Output Paths
 - `vault/<slug>/` — full text, extracted JSON files per paper.
