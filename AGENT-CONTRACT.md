@@ -208,6 +208,34 @@ Any RSS URL works (journal feeds, bioRxiv/medRxiv subject feeds), but PubMed
 *Create RSS* is the default because its query is re-runnable for date-windowed
 catch-up (R5.4).
 
+#### `add-feed` — agent steps
+
+On `add-feed <topic> <url>` in `#<kg>-agent`, the agent runs:
+
+1. **Parse** `topic` + `url`. If `topic` is missing, ask the user for it before
+   proceeding.
+2. **Validate the feed (malformed check).** Do not create anything until it
+   passes:
+   - well-formed `http(s)` URL;
+   - fetch it once and confirm it parses as RSS/Atom XML with **≥ 1 entry**;
+   - on failure (unreachable, not XML, zero entries), reply with the **specific
+     error** and ask the user to re-supply the URL. No node is written.
+3. **Ask for settings** (prompt, do not assume). Confirm the `topic` and offer the
+   per-feed options, defaulting from `config/agent_tuning.yml` (R12):
+   - auto-approve this feed? (skip the gate — default no)
+   - include in the daily digest? (default yes)
+   - max items per scan (default `rss.max_candidates_per_digest`)
+
+   Present the defaults; proceed on the user's confirmation or overrides.
+4. **Write** (workspace-asserted, R1.3): find-or-create the `watch:<topic>` node;
+   append `<url>` to `metadata.feeds` (dedup); set `metadata.last_run` if new;
+   store the confirmed per-feed settings in metadata.
+5. **Confirm** in Slack, emit the `config/rss_feeds.yml` line for commit-back, and
+   suggest `scan now <topic>` to test.
+
+A malformed or empty feed never creates a `watch` node — the agent asks the user
+to fix the URL first.
+
 ---
 
 ## Ingestion Pipeline (canonical)

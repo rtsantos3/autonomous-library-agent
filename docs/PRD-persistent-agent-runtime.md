@@ -280,6 +280,9 @@ housekeeping:
 
 The infra reads this via the same resolution precedence as other config
 (env > config file > default) and validates unknown keys (warn, ignore).
+**Per-feed overrides** (set at `add-feed` time and stored on the `watch` node —
+`auto_approve`, `in_digest`, `max_items`) take precedence over these KG-wide
+defaults for that feed.
 
 ---
 
@@ -295,7 +298,11 @@ type:   watch          parent: rss-watchlist
 slug:   watch-<topic-slug>
 tags:   watch:topic, topic:<slug>
 metadata:
-  feeds:    ["<eutils-esearch-url>", ...]
+  feeds:                                 # per-feed settings (from add-feed prompts)
+    - url: "<pubmed-rss-url>"
+      auto_approve: false                # skip the gate for this feed?
+      in_digest: true                    # include in the daily digest?
+      max_items: 25                      # cap per scan (default rss.max_candidates_per_digest)
   last_run: "2026-07-17T07:00:00Z"      # drives R5.4 catch-up
 ```
 
