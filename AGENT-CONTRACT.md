@@ -151,39 +151,6 @@ Runs as part of the autonomous loop. On each cycle:
 
 ---
 
-## Hooks (event-driven triggers)
-
-Beyond the polling loop (Mode 1) and interactive queries (Mode 2), the agent
-**monitors its Slack channels for specific events and reacts**. Each hook is a
-`trigger → action` pair. Hooks may mutate configuration or the graph, but — like
-everything — they mint `reference` nodes **only** via `ingest_batch` (Prime
-Directive). Every hook runs the fail-closed workspace assert before any write, so
-a message in one KG's channel can never mutate another KG's graph.
-
-| Hook (trigger) | Channel | Action |
-|----------------|---------|--------|
-| `watch <topic> "<terms>"` | `#<kg>-agent` | build the eutils `esearch` URL from the terms; find-or-create the `watch:<topic>` node; append to `metadata.feeds` (dedup); init `last_run`; confirm |
-| `add-feed <topic> <url>` | `#<kg>-agent` | validate it is an eutils/`esearch` URL; append to the topic's `metadata.feeds` |
-| `remove-feed <topic> [url]` | `#<kg>-agent` | remove a feed URL, or the whole topic if none given |
-| `scan now <topic>` | `#<kg>-agent` | run RSS discovery for that topic immediately; post the resulting digest |
-| ✅ / `approve <slug\|all>` | `#<kg>-rss-digest` | flip candidate `rss:pending → rss:approved`; drain it via `ingest_batch` |
-| ❌ / `reject <slug>` | `#<kg>-rss-digest` | tombstone `declined:<id>`; delete the candidate |
-| paper id / RIS posted | `#<kg>-add-paper` | `ingest_batch([id])` directly (explicit intent, no gate); reply with the slug |
-
-**Adding a search tag through the agent** is the `watch` / `add-feed` hook: the
-`<topic>` you name becomes the `topic:<slug>` tag stamped on every candidate and
-every paper later ingested from that feed — so one command sets both the *search*
-and the *filter tag* (`trellis find --tag topic:<slug>`). Adding a term that is
-already present is a no-op (the `metadata.feeds` list dedups).
-
-**Reproducibility.** A feed mutation updates the runtime `watch` node (the source
-of truth) immediately; the agent also emits the corresponding
-`config/rss_feeds.yml` line so the change can be committed back to the KG library
-repo (otherwise a re-hydrate loses agent-added feeds). See
-`docs/messenger-integration.md` §5/§13 for the command surface and schemas.
-
----
-
 ## Ingestion Pipeline (canonical)
 
 There is **exactly one ingestion pipeline**: `pipeline.ingestion.ingest_batch`.
