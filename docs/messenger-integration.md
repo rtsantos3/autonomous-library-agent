@@ -211,7 +211,102 @@ ephemeral files); logs → `tests/results/`; offline suite stays network-free.
 
 ---
 
-## 11. Open items
+## 11. Scheduling, catch-up & housekeeping
+
+- **Missed-run catch-up (#1).** Each watch node stores `last_run` (UTC).
+  `rss_watch.py` issues a **date-windowed eutils `esearch`**
+  (`mindate=last_run`, `maxdate=now`) instead of consuming raw RSS, so papers
+  published while the cron was down are recovered on the next successful run. On
+  success, `last_run` advances to the run's start time. First run uses a bounded
+  default window (30 days).
+- **Burst politeness (#2).** The drain caps concurrency to NCBI's limit — ≤ 10
+  req/s **with** an API key (3/s without). In practice the drain runs with a
+  small worker cap (e.g. `workers ≤ 3`) and relies on `_http.py` backoff; feed
+  fetches are sequential per feed.
+- **Stale pending (#3).** A candidate unactioned for N days transitions
+  `rss:pending → rss:stale`: **kept, not deleted, not tombstoned.** It drops out
+  of the daily digest (no re-nag) but stays queryable and bulk-actionable
+  (`approve all`, `reject stale`). Because it is kept, the idempotent upsert never
+  recreates or double-counts it. It neither disappears nor nags.
+- **Agent-only drain with re-sweep (#4).** No safety cron. Every drain pass
+  selects **all** `rss:approved` candidates (not just newly approved) **except**
+  those already dead-lettered. So approvals left un-ingested because the agent was
+  down are automatically re-fed on the next pass; known failures (dead-letter,
+  in the ledger) are excluded. The drain is a full re-sweep, which makes
+  agent-only safe.
+
+---
+
+## 12. Observability
+
+- **Runtime logs** → `<workspace>/logs/rss_watch.log` and `drain.log` (rotated).
+  (`tests/results/` is test output, separate.) Each run logs the counters below.
+- **Daily bulletin** → `#<kg>-rss-digest`: the run summary —
+  `found / new / skipped-suppressed / already-present / pending` — plus the
+  approval digest.
+- **Weekly bulletin** → `#<kg>-alerts` (or a dedicated `#<kg>-bulletin`): a
+  rollup — references added this week by topic, `needs-review` count,
+  `dead-letter` count, per-feed health (last success timestamp), and pending
+  backlog. This is the "weekly journal bulletin."
+
+---
+
+## 13. Schemas
+
+> Custom node types (`watch`, `rss-candidate`, `rss-tombstone`) assume Trellis
+> accepts arbitrary type strings. If it restricts to the core set, tag-type them
+> under a generic node instead (e.g. a `concept` tagged `kind:rss-candidate`).
+
+**Watch-topic node** — one per topic, source of truth for feeds at runtime.
+```
+type:   watch          parent: rss-watchlist
+slug:   watch-<topic-slug>
+tags:   watch:topic, topic:<slug>
+metadata:
+  feeds:    ["<eutils-esearch-url>", ...]
+  last_run: "2026-07-17T07:00:00Z"      # drives #1 catch-up
+```
+
+**rss-candidate node** — the pre-graph queue (never a `reference`).
+```
+type:   rss-candidate  parent: watch-<topic-slug>
+slug:   cand-<sha1(identifier)[:12]>    # stable → idempotent, no dupes
+tags:   rss:pending | rss:approved | rss:stale,
+        source:rss, topic:<slug>, id:<doi|pmid>, retry:<n>
+metadata:
+  identifier: {doi | pmid}
+  title, feed_url, discovered: "<date>"
+```
+
+**rss-tombstone node** — suppressed-identifier ledger, one tiny node per id
+(scales better than one mega-tag node; O(1) `is_suppressed` by slug).
+```
+type:   rss-tombstone
+slug:   tomb-<sha1(identifier)[:12]>
+tags:   suppressed, declined | dead-letter, id:<doi|pmid>
+metadata: { reason, date }
+```
+
+**Feeds config (library repo, declarative seed)** —
+`<library-repo>/config/rss_feeds.yml`:
+```yaml
+kg_id: LAD_library
+topics:
+  gut-brain-axis:
+    feeds:
+      - "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=..."
+  fecal-transplant:
+    feeds: ["..."]
+```
+The graph watch nodes are the **runtime** source of truth; this YAML is the
+**declarative** definition (version-controlled per-KG). A `sync-feeds` step
+imports YAML → watch nodes idempotently, so a fresh clone reconstructs the
+watchlist. `add-feed`/`remove-feed` mutate the watch node directly; committing
+the change back to the YAML keeps them in sync.
+
+---
+
+## 14. Open items
 
 - **Block Kit interactive UI** (checkboxes/buttons) — deferred; needs an
   interactive endpoint alongside the poller.
@@ -224,7 +319,7 @@ ephemeral files); logs → `tests/results/`; offline suite stays network-free.
 
 ---
 
-## 12. Relationship to other docs
+## 15. Relationship to other docs
 
 - `docs/PRD-persistent-agent-runtime.md` — mechanical lanes, ledger, workspace
   binding, command semantics.
