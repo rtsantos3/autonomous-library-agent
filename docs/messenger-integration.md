@@ -96,7 +96,7 @@ Reply on header:  approve 1 3 | reject 2 | approve all
 actions (drain / tombstone).
 
 **`#<kg>-agent`** — free-text queries (PRD Mode 2) and the command/hook surface
-(PRD R9: `approve`, `reject`, `watch`, `add-feed`, `remove-feed`, `scan now`,
+(PRD R9: `approve`, `reject`, `add-feed`, `remove-feed`, `scan now`,
 `status`, `retry`, `research`). This doc only carries the messages; the semantics
 are the PRD's.
 
