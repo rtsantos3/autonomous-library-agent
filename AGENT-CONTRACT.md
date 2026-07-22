@@ -15,7 +15,7 @@ You operate in exactly two modes. Determine which mode applies from context at s
 Run continuously. Each cycle (max 50 nodes per cycle):
 
 #### Phase A — Startup Check
-1. `trellis find --tag pipeline:digesting --json` → if any results, set them to `pipeline:failed` and notify user via Telegram ("stale digesting nodes found: [slugs]").
+1. `trellis find --tag pipeline:digesting --json` → if any results, set them to `pipeline:failed` and notify user via Slack ("stale digesting nodes found: [slugs]").
 
 #### Phase B — Ingestion (canonical pipeline)
 
@@ -35,7 +35,16 @@ citations, and sets final status in one pass.
 Inbound/outbound citation linking and dedup are handled inside the pipeline;
 there is no separate citation-expansion or hop-tracking step to run by hand.
 
-#### Phase C — Digestion (process scaffolded nodes)
+#### Phase C — Full-text extraction (USER-PROMPTED, on-demand — NOT autonomous)
+
+> **Not part of the automated pipeline.** Digestion ends at `pipeline:digested`
+> (resolve → enrich → dedup → link). The full-text extraction below (findings /
+> hypotheses / methods via Marker / Nougat) is **never run automatically** — it
+> executes **only when a user explicitly prompts it** for a specific paper (an
+> on-demand action, e.g. a `digest <slug>` request). The autonomous loop **skips
+> this phase entirely**. Query Mode is grounded in abstracts + citation structure,
+> not `vault/<slug>/full_text.md`.
+
 1. `trellis find --tag pipeline:scaffolded --json` → get list of scaffolded nodes.
 2. For each node:
    a. Claim: `trellis update <slug> --tags "pipeline:digesting"`.
@@ -106,7 +115,7 @@ there is no separate citation-expansion or hop-tracking step to run by hand.
 
 #### Phase E — Review Notifier
 1. `trellis find --tag pipeline:needs-review --json`.
-2. If results: send Telegram notification with slugs and uncertain findings.
+2. If results: send Slack notification with slugs and uncertain findings.
 
 #### Phase F — Sleep
 Sleep 5 minutes. Repeat from Phase B.
@@ -135,7 +144,7 @@ Triggered by `research <topic>` from the user.
 5. Run ingestion loop: scaffold → fetch citation graph → expand citations (max 2 hops).
 6. Run digestion loop: full text → extract → verify → write `vault/` + `references/`.
 7. Cross-link new findings to existing graph (`supports` / `contradicts` edges).
-8. Report back via Telegram as bullet summary with Trellis slug citations.
+8. Report back via Slack as bullet summary with Trellis slug citations.
 
 Send progress updates at each major milestone:
 - "Found N new papers on X, ingesting..."
@@ -147,7 +156,85 @@ Send progress updates at each major milestone:
 Runs as part of the autonomous loop. On each cycle:
 
 1. Query `trellis find --tag pipeline:needs-review --json`.
-2. If results found, send a Telegram notification listing the slugs and the uncertain findings for manual review.
+2. If results found, send a Slack notification listing the slugs and the uncertain findings for manual review.
+
+---
+
+## Hooks (event-driven triggers)
+
+Beyond the polling loop (Mode 1) and interactive queries (Mode 2), the agent
+**monitors its Slack channels for specific events and reacts**. Each hook is a
+`trigger → action` pair. Hooks may mutate configuration or the graph, but — like
+everything — they mint `reference` nodes **only** via `ingest_batch` (Prime
+Directive). Every hook runs the fail-closed workspace assert before any write, so
+a message in one KG's channel can never mutate another KG's graph. Message
+delivery is the Slack layer's concern (see `docs/messenger-integration.md`).
+
+| Hook (trigger) | Channel | Action |
+|----------------|---------|--------|
+| `add-feed <topic> <url>` | `#<kg>-agent` | **manual**: `<url>` is a PubMed RSS feed URL the user obtained via PubMed's *Create RSS* (see *Finding & adding feeds* below). Validate the URL; find-or-create the `watch:<topic>` node; append to `metadata.feeds` (dedup); init `last_run`; confirm |
+| `remove-feed <topic> [url]` | `#<kg>-agent` | remove a feed URL, or the whole topic if none given |
+| `scan now <topic>` | `#<kg>-agent` | run RSS discovery for that topic immediately; post the resulting digest |
+| ✅ / `approve <slug\|all>` | `#<kg>-rss-digest` | flip candidate `rss:pending → rss:approved`; drain it via `ingest_batch` |
+| ❌ / `reject <slug>` | `#<kg>-rss-digest` | tombstone `declined:<id>`; delete the candidate |
+| paper id / RIS posted | `#<kg>-add-paper` | `ingest_batch([id])` directly (explicit intent, no gate); reply with the slug |
+
+**Adding a feed is manual.** The user finds the search on PubMed and supplies its
+RSS URL; the agent never builds queries from free-text. The `<topic>` you name
+becomes the `topic:<slug>` tag stamped on every candidate and every paper later
+ingested from that feed (`trellis find --tag topic:<slug>`). Adding a URL already
+present is a no-op (the `metadata.feeds` list dedups).
+
+**Reproducibility.** A feed mutation updates the runtime `watch` node (the source
+of truth) immediately; the agent also emits the corresponding
+`config/rss_feeds.yml` line so the change can be committed back to the KG library
+repo. See the runtime PRD (R5/R9) and `docs/messenger-integration.md` for the
+Slack delivery.
+
+### Finding & adding feeds (manual)
+
+Feeds are added by hand — the agent does not construct PubMed queries. To add one:
+
+1. On **pubmed.ncbi.nlm.nih.gov**, run the search. Prefer precise syntax: MeSH
+   terms (`"Gastrointestinal Microbiome"[MeSH]`), field tags (`[tiab]`, `[au]`,
+   `[ta]`), and boolean grouping (`AND` / `OR` / `NOT`).
+2. Click **Create RSS** (under the search bar) → copy the generated **feed URL**.
+3. Add it: `add-feed <topic> <url>`.
+4. Verify with `scan now <topic>` — runs discovery immediately and posts the
+   digest, so a noisy search can be caught and `remove-feed`'d before it becomes a
+   daily feed.
+
+Any RSS URL works (journal feeds, bioRxiv/medRxiv subject feeds), but PubMed
+*Create RSS* is the default because its query is re-runnable for date-windowed
+catch-up (R5.4).
+
+#### `add-feed` — agent steps
+
+On `add-feed <topic> <url>` in `#<kg>-agent`, the agent runs:
+
+1. **Parse** `topic` + `url`. If `topic` is missing, ask the user for it before
+   proceeding.
+2. **Validate the feed (malformed check).** Do not create anything until it
+   passes:
+   - well-formed `http(s)` URL;
+   - fetch it once and confirm it parses as RSS/Atom XML with **≥ 1 entry**;
+   - on failure (unreachable, not XML, zero entries), reply with the **specific
+     error** and ask the user to re-supply the URL. No node is written.
+3. **Ask for settings** (prompt, do not assume). Confirm the `topic` and offer the
+   per-feed options, defaulting from `config/agent_tuning.yml` (R12):
+   - auto-approve this feed? (skip the gate — default no)
+   - include in the daily digest? (default yes)
+   - max items per scan (default `rss.max_candidates_per_digest`)
+
+   Present the defaults; proceed on the user's confirmation or overrides.
+4. **Write** (workspace-asserted, R1.3): find-or-create the `watch:<topic>` node;
+   append `<url>` to `metadata.feeds` (dedup); set `metadata.last_run` if new;
+   store the confirmed per-feed settings in metadata.
+5. **Confirm** in Slack, emit the `config/rss_feeds.yml` line for commit-back, and
+   suggest `scan now <topic>` to test.
+
+A malformed or empty feed never creates a `watch` node — the agent asks the user
+to fix the URL first.
 
 ---
 
@@ -449,7 +536,7 @@ Use `--json` on find commands when parsing output programmatically.
 ### Prompt Templates
 - `prompts/extract.md` — extraction prompt. Substitute `{{paper_text}}`. Returns JSON with findings, hypotheses, methods, concepts, datasets, gaps.
 - `prompts/verify.md` — verification prompt. Substitute `{{extracted_items}}`. Returns JSON with confirmed/uncertain/rejected verdicts.
-- `prompts/research_report.md` — report prompt. Substitute `{{topic}}`, `{{confirmed_findings}}`, `{{uncertain_findings}}`, `{{gaps}}`. Returns Telegram-ready bullet summary.
+- `prompts/research_report.md` — report prompt. Substitute `{{topic}}`, `{{confirmed_findings}}`, `{{uncertain_findings}}`, `{{gaps}}`. Returns Slack-ready bullet summary.
 
 ### Output Paths
 - `vault/<slug>/` — full text, extracted JSON files per paper.
