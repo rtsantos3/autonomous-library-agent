@@ -123,18 +123,41 @@ Concrete values are never committed to the tooling repo.
   Never fabricate a DOI/PMID/slug; show only what resolved.
 
 ### R5 — Topic RSS (scheduled discovery)
-- **R5.1** RSS runs as a **daily cron** (`scripts/rss_watch.py`), decoupled from
-  the tight autonomous loop.
-- **R5.2 Enqueue-only:** the cron adds discovered papers as `pipeline:queued`
-  tagged `source:rss` and `topic:<slug>`. The autonomous loop performs the actual
-  `ingest_batch`. This yields a **human approval gate** (see R9 `approve`).
-- **R5.3 Graph-native watch list:** topics are Trellis nodes (children of an
-  `rss-watchlist` root, tagged `watch:topic`) holding their feed URLs in metadata.
-  The **topic/feed *values* are supplied per-KG** (library-repo YAML, §3); the
-  infra provides the node convention and the cron that reads them.
-- **R5.4 No seen-DB for accepts:** because `ingest_batch` is idempotent and the
-  graph dedups, re-reading a feed re-merges existing nodes (no-op) and enqueues
-  only genuinely new identifiers.
+- **R5.1 Daily cron, mechanical.** RSS runs as a daily cron
+  (`scripts/rss_watch.py`), decoupled from the tight loop. Discovery is
+  mechanical (no LLM): read watch nodes → fetch feeds → extract DOI/PMID → filter
+  → stage candidates.
+- **R5.2 Pre-graph candidates (not reference stubs).** Discovered papers are
+  staged as `rss-candidate` nodes — a **distinct type, never `reference`** —
+  tagged `rss:pending`, `source:rss`, `topic:<slug>` (schema §5). This keeps the
+  reference space 100% `ingest_batch`-made (R3). The candidate *is* the approval
+  queue; it is not a paper in the graph.
+- **R5.3 Graph-native watch list.** Topics are `watch` nodes (children of an
+  `rss-watchlist` root, tagged `watch:topic`) holding feed URLs and `last_run` in
+  metadata. Topic/feed *values* are per-KG (library YAML, §3); the infra provides
+  the node convention and the cron.
+- **R5.4 Missed-run catch-up.** Each watch node stores `last_run` (UTC); the cron
+  issues a **date-windowed eutils `esearch`** (`mindate=last_run`, `maxdate=now`)
+  rather than consuming raw RSS, so papers published while the cron was down are
+  recovered on the next run. `last_run` advances on success; first run uses a
+  30-day default window.
+- **R5.5 Agent-driven drain (not a cron).** After a human approves (R9), the
+  **agent** calls `ingest_batch` on approved candidates itself — it is the drain.
+  Every drain pass **re-sweeps all** `rss:approved` candidates except
+  dead-lettered ones, so approvals left un-ingested (agent down) are auto-retried
+  next pass. No separate drain cron.
+- **R5.6 Burst politeness.** The drain caps concurrency to NCBI's limit (≤ 10
+  req/s with an API key, 3/s without): small worker cap (`workers ≤ 3`) +
+  `_http.py` backoff; feed fetches are sequential per feed.
+- **R5.7 Stale housekeeping.** A candidate unactioned for N days transitions
+  `rss:pending → rss:stale`: **kept, not deleted, not tombstoned.** It drops out
+  of the daily digest but stays queryable and bulk-actionable, and the idempotent
+  upsert never recreates it. Neither lost nor nagging.
+- **R5.8 No seen-DB for accepts.** `ingest_batch` idempotency + graph dedup mean
+  re-reading a feed re-merges existing nodes (no-op) and stages only new
+  identifiers; only declines/dead-letters need the ledger (R6).
+- **R5.9 A candidate leaves the queue only on confirmed successful ingest** —
+  any failure leaves it `rss:approved` for the next drain to retry (see §6).
 
 ### R6 — Suppressed-identifier ledger
 - **R6.1** A single **per-KG ledger node** records identifiers not to re-process,
@@ -165,14 +188,28 @@ Concrete values are never committed to the tooling repo.
 - **R8.2 Fallback:** if a Slack notification fails, the agent drops to a
   `pipeline:needs-review` tag + a log line so no event is lost silently.
 
-### R9 — Command surface (interactive)
-The agent accepts these operator commands, plus the existing `research <topic>`:
-- `approve <slug|all>` — promote queued candidate(s) for ingestion.
+### R9 — Command surface & hooks (interactive)
+The agent monitors for these operator commands/hooks (event-driven; message
+delivery is the messenger layer's concern — see `docs/messenger-integration.md`).
+Every hook runs the R1.3 fail-closed workspace assert before any write, and mints
+`reference` nodes only via `ingest_batch` (R3).
+- `research <topic>` — existing research command.
+- `approve <slug|all>` — approve candidate(s); the agent drains via `ingest_batch`
+  (R5.5).
 - `reject <slug>` — decline a candidate; writes a tombstone (R6).
-- `add-feed <topic> <url>` — add/extend a watch-topic node (R5.3).
-- `remove-feed <topic> [url]` — remove a topic or one of its feeds.
-- `status` — report queue / needs-review / dead-letter counts.
+- `watch <topic> "<terms>"` — build the eutils query from terms, find-or-create
+  the watch node, append the feed (dedup), init `last_run`.
+- `add-feed <topic> <url>` — validate + append a raw eutils feed URL.
+- `remove-feed <topic> [url]` — remove a feed URL, or the whole topic.
+- `scan now <topic>` — run RSS discovery for a topic immediately.
+- `status` — queue / needs-review / dead-letter / pending counts.
 - `retry <slug>` — force a dead-lettered node back into processing.
+
+**Adding a search tag through the agent** is the `watch` / `add-feed` hook: the
+`<topic>` becomes the `topic:<slug>` filter tag stamped on every candidate and
+every paper later ingested from that feed. Feed mutations update the runtime
+`watch` node (source of truth) and **emit the corresponding `config/rss_feeds.yml`
+line** so the change can be committed back to the KG library repo.
 
 ### R10 — Contract versioning
 - **R10.1** Each KG's `AGENT-CONTRACT.md` carries a header with
@@ -182,9 +219,127 @@ The agent accepts these operator commands, plus the existing `research <topic>`:
   complete contract. Universal mechanics are duplicated across KGs by design;
   divergence is managed manually.
 
+### R11 — Observability
+- **R11.1 Runtime logs** → `<workspace>/logs/rss_watch.log` and `drain.log`
+  (rotated). Each run logs the counters
+  `found / new / skipped-suppressed / already-present / pending / ingested /
+  failed`. (`tests/results/` is test output, separate.)
+- **R11.2 Daily bulletin** — the per-run summary + the approval digest.
+- **R11.3 Weekly bulletin** — a rollup: references added this week by topic,
+  `needs-review` count, `dead-letter` count, per-feed health (last success), and
+  pending backlog. Bulletin *delivery* is the messenger layer's concern.
+
 ---
 
-## 5. Decision log
+## 5. Node schemas
+
+> Custom node types (`watch`, `rss-candidate`, `rss-tombstone`) assume Trellis
+> accepts arbitrary type strings. If it restricts to the core set, tag-type them
+> under a generic node (e.g. a `concept` tagged `kind:rss-candidate`).
+
+**Watch-topic node** — one per topic; runtime source of truth for feeds.
+```
+type:   watch          parent: rss-watchlist
+slug:   watch-<topic-slug>
+tags:   watch:topic, topic:<slug>
+metadata:
+  feeds:    ["<eutils-esearch-url>", ...]
+  last_run: "2026-07-17T07:00:00Z"      # drives R5.4 catch-up
+```
+
+**rss-candidate node** — the pre-graph queue (never a `reference`).
+```
+type:   rss-candidate  parent: watch-<topic-slug>
+slug:   cand-<sha1(identifier)[:12]>    # stable → idempotent, no dupes
+tags:   rss:pending | rss:approved | rss:stale,
+        source:rss, topic:<slug>, id:<doi|pmid>, retry:<n>
+metadata:
+  identifier: {doi | pmid}
+  title, feed_url, discovered: "<date>"
+```
+
+**rss-tombstone node** — suppressed-identifier ledger (R6), one tiny node per id
+(O(1) `is_suppressed` by slug; scales better than one mega-tag node).
+```
+type:   rss-tombstone
+slug:   tomb-<sha1(identifier)[:12]>
+tags:   suppressed, declined | dead-letter, id:<doi|pmid>
+metadata: { reason, date }
+```
+
+**Feeds config (library repo, declarative seed)** —
+`<library-repo>/config/rss_feeds.yml`:
+```yaml
+kg_id: <kg_id>
+topics:
+  <topic-slug>:
+    feeds:
+      - "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=..."
+```
+The graph `watch` nodes are the **runtime** source of truth; this YAML is the
+**declarative** definition (version-controlled per-KG). A `sync-feeds` step
+imports YAML → watch nodes idempotently, so a fresh clone reconstructs the
+watchlist. `watch`/`add-feed`/`remove-feed` mutate the watch node directly.
+
+---
+
+## 6. Failure conditions
+
+Governing principles: **fail isolated** (one bad item never aborts a batch),
+**fail safe** (a mid-way crash is a safe re-run because every step is idempotent),
+**fail loud** (surface to alerts; if Slack send fails, fall back to a
+`pipeline:needs-review` tag + log so nothing is lost silently — R8.2).
+
+| Stage | Failure | Handling |
+|-------|---------|----------|
+| Feed fetch | URL down / timeout / 5xx | backoff (`_http.py`); after N, skip that feed this run, log, continue others |
+| Feed fetch | malformed / partial XML | parse valid entries, skip the rest, log count |
+| ID extraction | entry has no DOI/PMID | skip entry; log per-feed "no-identifier" count |
+| Candidate write | Trellis write fails | log + skip; next cron retries (stable slug → no dupes) |
+| Candidate write | wrong workspace | **fail-closed assert aborts the run before any write** (R1.3) |
+| Approval | slug missing / already ingested | no-op + reply; never errors |
+| Drain (`ingest_batch`) | one item fails | **per-item isolation** — error in `outcomes[i].errors`, batch continues |
+| Drain | unresolvable id | `pipeline:failed`; candidate **kept**; `retry:N`++ |
+| Drain | locator-less/title-only unresolved | `pipeline:needs-review`; posted to alerts |
+| Drain | same paper fails 3× | `pipeline:dead-letter` + ledger tombstone; candidate deleted |
+| Mid-drain crash | died after ingest, before delete | **safe** — candidate deleted only after confirmed success; re-run dedups |
+
+**The rule that ties it together:** a candidate leaves the queue **only on a
+confirmed successful ingest** (R5.9). Any failure leaves it `rss:approved` for the
+next drain to retry; `ingest_batch` idempotency means retries merge, never
+duplicate. Permanently-broken items dead-letter out after 3 tries. Open tunables:
+retry cap (default 3); feed-fetch alerting only after a feed fails N days running.
+
+---
+
+## 7. Testing
+
+Framework: **pytest** (existing). Reuse `tests/conftest.py`'s two tiers — the
+`ephemeral_trellis` fixture (throwaway real workspace, no mock) and the
+`integration` marker (network + live Trellis, skipped by default).
+
+**No mocks**, per project rule, achieved by design:
+- Parsing is a **pure function over recorded fixtures** — real captured RSS XML in
+  `tests/fixtures/rss/*.xml`, no network.
+- The drain is split `ingest_batch()` (network) vs `handle_results(candidates,
+  outcomes)` (pure state machine), so all failure handling is tested with real
+  `IngestionOutcome` objects; the live `ingest_batch` runs only in the integration
+  tier.
+
+| File | Tier | Covers |
+|------|------|--------|
+| `test_rss_feeds.py` | offline (fixtures) | valid feed → ids; malformed XML → partial; no-identifier entry → skipped |
+| `test_rss_candidates.py` | offline (`ephemeral_trellis`) | idempotent upsert (no dupes); approve = tag flip; reject = tombstone + delete |
+| `test_rss_ledger.py` | offline (`ephemeral_trellis`) | suppress → `is_suppressed`; declined/dead-letter round-trip |
+| `test_rss_drain.py` | offline (pure) | success → deleted; failure → kept + `retry`++; 3rd fail → dead-letter |
+| `test_rss_integration.py` | `-m integration` | full chain: fixture feed → candidate → approve → real `ingest_batch` → reference exists, candidate gone |
+
+Conventions: run in the Docker env; fixtures committed (deterministic); logs →
+`tests/results/`; offline suite stays network-free.
+
+---
+
+## 8. Decision log
 
 | # | Topic | Decision |
 |---|-------|----------|
@@ -200,10 +355,16 @@ The agent accepts these operator commands, plus the existing `research <topic>`:
 | — | Notifications | Slack + needs-review fallback |
 | — | Reinforcement | Prime Directive + de-footgun docs + annotation-based audit + CI grep guard |
 | — | Config boundary | Infra generic here; place-specific YAMLs in the KG library repo |
+| — | RSS queue | Pre-graph `rss-candidate` nodes (not `pipeline:queued` reference stubs) |
+| — | Ingestion trigger | Agent-driven drain on approval (re-sweeps all `rss:approved`); no drain cron |
+| — | Catch-up | Date-windowed eutils `esearch` via per-watch `last_run` |
+| — | Burst | Drain workers ≤ NCBI limit |
+| — | Stale pending | `rss:pending → rss:stale` (kept, no re-nag, not lost) |
+| — | Observability | Runtime logs + daily and weekly bulletins |
 
 ---
 
-## 6. Open items / deferred
+## 9. Open items / deferred
 
 - **Full-text extraction** offload target (where Phase C runs, if enabled) is
   undecided; off by default.
@@ -214,11 +375,17 @@ The agent accepts these operator commands, plus the existing `research <topic>`:
 
 ---
 
-## 7. Downstream deliverables
+## 10. Downstream deliverables
 
-- Edits to each KG's `AGENT-CONTRACT.md` (per KG, in the library repo).
-- New generic `scripts/rss_watch.py` (infra).
-- One CI guard test (infra).
-- Per-KG YAML (feeds, topics, `kg_id`, profile) in the library repo.
+- `pipeline/rss/` — `feeds.py` (date-windowed eutils fetch + id extraction),
+  `candidates.py` (rss-candidate CRUD), `ledger.py` (tombstone/suppress),
+  `ingest_approved.py` (drain: `handle_results` split, re-sweep, retry cap).
+- `scripts/rss_watch.py` — the discovery cron entry (infra).
+- `tests/test_rss_*.py` + `tests/fixtures/rss/*.xml` (per §7).
+- Edits to each KG's `AGENT-CONTRACT.md` (Hooks section; per KG, in the library
+  repo).
+- One CI guard test for the Prime Directive (R3.4).
+- Per-KG YAML (`config/rss_feeds.yml`, `kg_id`, profile) in the library repo.
+- The Slack delivery layer — see `docs/messenger-integration.md`.
 
 No changes to `pipeline/ingestion.py`.
