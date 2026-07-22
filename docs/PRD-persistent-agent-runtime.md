@@ -76,15 +76,18 @@ Concrete values are never committed to the tooling repo.
 - **R1.4** A crash of the single process halts all KGs; it therefore runs under a
   supervisor (systemd or equivalent) that restarts on exit.
 
-### R2 — Host role (ingest-only profile)
-- **R2.1** The infra supports an **ingest + enrich + link only** profile: final
-  state is abstract-grade `pipeline:digested`.
-- **R2.2** Full-text extraction (Marker / Nougat, contract Mode 1 Phase C) is a
-  **profile-gated** stage. On a resource-constrained shared host it is disabled;
-  a KG/host that wants it opts in. The default profile leaves it off.
-- **R2.3** When full-text is off, query mode is grounded in abstracts + citation
-  structure; the contract must state `vault/<slug>/full_text.md` is not
-  guaranteed, so the agent must not promise full-text content.
+### R2 — Digestion boundary (ingest-only automation)
+- **R2.1** The automated pipeline is **ingest + enrich + link only**: digestion
+  ends at `pipeline:digested` (resolve → enrich → dedup → link). That is the
+  terminal state the autonomous loop produces.
+- **R2.2 Full-text extraction is user-prompted, never automated.** The full-text
+  stage (findings / hypotheses / methods via Marker / Nougat, contract Mode 1
+  Phase C) is **not part of the autonomous pipeline**. It runs **only when a user
+  explicitly prompts it** for a specific paper (an on-demand `digest <slug>`
+  action). The autonomous loop skips it entirely.
+- **R2.3** Because full-text is not produced automatically, query mode is grounded
+  in abstracts + citation structure; the agent must not promise
+  `vault/<slug>/full_text.md` content that a user has not explicitly requested.
 
 ### R3 — Bound-pipeline reinforcement
 - **R3.1 Prime Directive:** every `reference` node is created **only** by
@@ -343,7 +346,7 @@ Conventions: run in the Docker env; fixtures committed (deterministic); logs →
 
 | # | Topic | Decision |
 |---|-------|----------|
-| Q1 | Host role | Ingest + enrich + link only (default profile); full-text off; query = abstract+citation-grounded |
+| Q1 | Digestion boundary | Automated digestion ends at `pipeline:digested`; full-text extraction is user-prompted only (never automated); query = abstract+citation-grounded |
 | Q2 | Tenancy | One agent, many KGs, per-workspace |
 | Q3 | Contract loading | Loaded per-KG by workspace |
 | Q4 | Contract structure | Fused / self-contained per KG (accepts duplication) |
