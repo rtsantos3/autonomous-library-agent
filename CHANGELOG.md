@@ -6,6 +6,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- 2026-10-22: Collect the union of Semantic Scholar and Crossref references, with
+  identifier deduplication, per-reference sources, and provider availability.
 - RIS-based ingestion: `ingest_batch` accepts `list[str | dict]`, so DOI-less
   records (e.g. title-only RIS entries) flow through the same pipeline as bare
   DOIs via `parse_input`.
@@ -41,6 +43,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `scripts/import_ris_network.py`).
 
 ### Fixed
+- 2026-10-22: Empty or unavailable bibliographies no longer pass verification
+  or reach `pipeline:digested`. They retain an incomplete citation status and
+  finish as `pipeline:needs-review`. S2 publisher-withheld notices are preserved.
 - RIS keywords are no longer dropped unconditionally. `parse_input` now accepts a
   `keywords` field and `resolve_identity` keeps source-side RIS `KW` as a
   fallback floor when enrichment resolves no keywords of its own — enrichment

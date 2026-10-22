@@ -134,7 +134,7 @@ by hand-rolling `trellis add`/`link`.
    phase 1½│ reverse_materialize .......... link papers already in graph that cite this one
            │ build_edge_index ............. snapshot edges (dedupe guard)
            ▼
-   phase 2 │ fetch_and_store → store_citations .. fetch outbound cites, write onto node
+   phase 2 │ fetch_and_store → store_citations .. union S2 + Crossref references, preserve sources
            ▼
    phase 3 │ link_stored → link_citations ...... edges to targets already present
            ▼
@@ -169,9 +169,32 @@ dedup converges re-ingests onto one node; identity/status tags are re-derived
 each pass; topical tags (`mesh:`/`kw:`/`field:`/`type:`) are re-derived only when
 the resolved record carries topical data and otherwise **preserved**, so a sparse
 re-ingest never wipes a previously enriched node; and `store_citations` never
-overwrites a non-empty citation set with an empty one. The pipeline produces
-`pipeline:digested` directly and never emits `pipeline:scaffolded` (a legacy stub
-state from the retired single-paper scaffolder).
+overwrites a non-empty citation set with an empty one. Empty or unavailable
+bibliographies finish as `pipeline:needs-review`, not `pipeline:digested`.
+The pipeline never emits `pipeline:scaffolded` (a legacy stub state from the
+retired single-paper scaffolder).
+
+**Citation collection:** Semantic Scholar and Crossref both contribute references;
+Crossref is not only a fallback. Non-empty S2 batch references are reused, and
+per-paper S2 requests follow pagination. The union deduplicates normalized DOIs,
+PMIDs, and S2 IDs. Exact, unambiguous title matches can enrich identifier-poor
+references; conflicting DOIs stay separate. Each item records its `sources`.
+`outbound_citations.providers` records provider outcomes and publisher notices.
+`outbound_citations.status` is `available` or `incomplete`. Available means that
+usable references were collected, not that the bibliography is exhaustive.
+
+To repair an existing paper without replaying Slack uploads, run the same pipeline
+against its DOI in the intended workspace:
+
+```python
+from pipeline.ingestion import ingest_batch
+
+outcomes, metrics = ingest_batch(["10.1038/s41575-025-01077-5"])
+print(outcomes[0].errors)
+```
+
+The pipeline updates the existing node and links only targets already in the
+library. It does not create nodes for every cited reference.
 
 See `AGENT-CONTRACT.md` → *Ingestion Pipeline* for the agent-facing contract.
 

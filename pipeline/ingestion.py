@@ -197,6 +197,7 @@ def _classify_failure(errors: list[str]) -> str:
         "malformed",
         "no doi",
         "locator",
+        "citation enrichment incomplete",
     )
     for error in errors:
         text = str(error).lower()
@@ -984,6 +985,8 @@ def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult
     ref["outbound_citations"] = {
         "source": citations.source,
         "retrieved_at": citations.retrieved_at,
+        "providers": citations.providers,
+        "status": "available" if citations.items else "incomplete",
         "items": [asdict(i) for i in citations.items],
     }
     current_meta["reference"] = ref
@@ -1073,7 +1076,7 @@ def verify_outcome(slug: str, edge_count: int = 0) -> VerifyResult:
                 break
         return VerifyResult(
             node_exists=True,
-            has_citation_metadata=isinstance(items, list),
+            has_citation_metadata=isinstance(items, list) and bool(items),
             pipeline_status=pipeline_status,
             # Count of citation edges linked during this run, supplied from LinkResult.
             edge_count=edge_count,
@@ -1191,16 +1194,9 @@ def fetch_and_store(
     try:
         item_doi = _item_doi(items[idx])
         prefetched = prefetched_for_doi(item_doi) if item_doi else None
-        if prefetched is not None and prefetched.citations:
-            citations = CitationResult(
-                source="s2-batch",
-                retrieved_at=date.today().isoformat(),
-                items=prefetched.citations,
-            )
-        else:
-            # doi may be None for a title-only record that never resolved an
-            # identifier; outbound-citation fetch is DOI-keyed so it no-ops.
-            citations = fetch_outbound_citations(doi or "")
+        citations = fetch_outbound_citations(
+            doi or "", prefetched=prefetched.citations if prefetched else None
+        )
         outcome.citation_store = store_citations(slug, citations)
         return idx, slug, citations
     except Exception as e:
@@ -1271,6 +1267,13 @@ def set_final_pipeline_status(
     idx, _doi, slug = item
     outcome = outcomes[idx]
     try:
+        if not outcome.errors:
+            if not outcome.verify or not outcome.verify.node_exists:
+                outcome.errors.append("Node verification failed")
+            elif not outcome.verify.has_citation_metadata:
+                outcome.errors.append(
+                    "Citation enrichment incomplete: no usable bibliography"
+                )
         status = _classify_failure(outcome.errors) if outcome.errors else "digested"
         trellis.set_pipeline_status(slug, status)
         if outcome.errors:

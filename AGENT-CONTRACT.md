@@ -272,10 +272,17 @@ final = "digested" if not o.errors else _classify_failure(o.errors)
 | — | `build_node_index` | Rebuild so later phases see nodes created in phase 1. |
 | — | `reverse_materialize` | Link **inbound** citations: existing graph nodes that cite this paper get a `references` edge to it. |
 | — | `build_edge_index` | Snapshot existing edges so linking is idempotent (works around the lack of an edge-uniqueness constraint). |
-| 2 | `fetch_and_store` | Fetch the paper's **outbound** citations and store them on the node (`metadata.reference.outbound_citations`). |
+| 2 | `fetch_and_store` | Collect and deduplicate **both** Semantic Scholar and Crossref outbound references. Reuse non-empty S2 batch data; paginate per-paper S2 requests. Store the union, per-item sources, and provider outcomes in `metadata.reference.outbound_citations`. |
 | 3 | `link_stored` | Materialize `references` edges to every cited target already present in the graph. |
-| 4 | `verify_outcome` | Confirm node exists, citation metadata present, edge count. |
-| 5 | `set_final_pipeline_status` | Set `pipeline:digested` on success, or `pipeline:needs-review` / `pipeline:failed` on classified errors. |
+| 4 | `verify_outcome` | Confirm the node exists and has a non-empty bibliography; report this run's linked edge count. |
+| 5 | `set_final_pipeline_status` | Set `pipeline:digested` after successful verification. Empty or unavailable bibliographies add an incomplete-enrichment error and finish as `pipeline:needs-review`; other errors remain classified as `needs-review` / `failed`. |
+
+Citation metadata uses `status: available` when usable references exist and
+`status: incomplete` otherwise. Available does not assert exhaustive coverage.
+`providers` distinguishes empty, unavailable, publisher-withheld, failed, and
+partial responses. Publisher notices are retained. Each reference has a `sources`
+list. Re-run `ingest_batch([doi])` to repair an existing paper in place; do not
+replay Slack uploads. Linking uses existing nodes only and is idempotent.
 
 ### Enrichment (`resolve_identity`)
 
