@@ -6,6 +6,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- 2026-10-23: Add Europe PMC, OpenAlex, and OpenCitations indexed references to
+  the citation union. Isolate all five retrieval APIs behind the same citation
+  record contract. Preserve index-only IDs, partial results, and provenance.
+- 2026-10-22: Collect the union of Semantic Scholar and Crossref references, with
+  identifier deduplication, per-reference sources, and provider availability.
 - RIS-based ingestion: `ingest_batch` accepts `list[str | dict]`, so DOI-less
   records (e.g. title-only RIS entries) flow through the same pipeline as bare
   DOIs via `parse_input`.
@@ -41,6 +46,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `scripts/import_ris_network.py`).
 
 ### Fixed
+- 2026-10-23: Conflicting preprint/publication PMIDs no longer duplicate an exact
+  DOI match. Preserve distinct DOIs and keep ambiguous secondary matches separate.
+- 2026-10-23: Resolve direct and transitive citation ambiguity before merging.
+  Preserve stable-ID anchors across generic titles and allow unambiguous title
+  bridges. Reject DOI-conflicting or ambiguous graph targets without rejecting
+  valid non-DOI URL locators.
+- 2026-10-23: Retain PMID-only and S2-ID-only batch references. Europe PMC no
+  longer lets an explicitly reference-less MED hit suppress an indexed PMC list.
+- 2026-10-22: Empty or unavailable bibliographies no longer pass verification
+  or reach `pipeline:digested`. They retain an incomplete citation status and
+  finish as `pipeline:needs-review`. S2 publisher-withheld notices are preserved.
 - RIS keywords are no longer dropped unconditionally. `parse_input` now accepts a
   `keywords` field and `resolve_identity` keeps source-side RIS `KW` as a
   fallback floor when enrichment resolves no keywords of its own — enrichment
@@ -51,6 +67,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `o.errors` (`digested`, else `_classify_failure`).
 
 ### Verified
+- 2026-10-23: Full canonical suite, including network integration cases: 358 passed.
+- 2026-10-23: Independent `gpt-6-sol` and `gpt-6-luna` source reviews identified
+  retrieval and identity gaps. Accepted findings have regression coverage and
+  focused closure reviews reported no remaining findings in scope. One claimed
+  S2 parser crash was rejected by an executed reproduction.
+- 2026-10-23: Five-provider intake passed for six microbiome RIS papers in an
+  isolated Trellis workspace. Repeat intake preserved node and edge IDs.
+  Retrieval without invoking Crossref returned 75 unique indexed references.
+  Focused checks: 148 passed; suppressing ambiguity detection caused 11 expected
+  assertion failures, then restoration passed all 148.
 - All `ingest_batch` input shapes exercised against the live LAD_library graph
   (2958 nodes): single DOI string, single dict, mixed batch, title-only,
   PMID-only, failure isolation, and intra-batch duplicate. Net new nodes: 0 (all

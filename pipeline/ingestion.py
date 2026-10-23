@@ -44,7 +44,8 @@ from pipeline._utils import (
     pub_type_slug,
     slugify,
 )
-from pipeline.citations import CitationResult, fetch_outbound_citations
+from pipeline.citation_types import CitationResult
+from pipeline.citations import ambiguous_citation_keys, fetch_outbound_citations
 from pipeline.trellis import _doi_key, _norm_title
 
 if TYPE_CHECKING:
@@ -197,6 +198,7 @@ def _classify_failure(errors: list[str]) -> str:
         "malformed",
         "no doi",
         "locator",
+        "citation enrichment incomplete",
     )
     for error in errors:
         text = str(error).lower()
@@ -984,6 +986,8 @@ def store_citations(slug: str, citations: CitationResult) -> CitationStoreResult
     ref["outbound_citations"] = {
         "source": citations.source,
         "retrieved_at": citations.retrieved_at,
+        "providers": citations.providers,
+        "status": "available" if citations.items else "incomplete",
         "items": [asdict(i) for i in citations.items],
     }
     current_meta["reference"] = ref
@@ -1002,22 +1006,46 @@ def link_citations(
     skipped = 0
     source_uuid = slug if trellis._is_uuid(slug) else trellis._resolve_to_uuid(slug)
     source_ref = source_uuid or slug
-    for item in citations.items:
+    ambiguous = ambiguous_citation_keys(citations.items)
+
+    def lookup(**identifiers):
         if index is not None:
-            target = trellis.dedup_check_indexed(
-                index,
-                s2id=item.s2_id,
-                doi=item.doi,
-                pmid=item.pmid,
-                title=item.title,
-            )
-        else:
-            target = trellis.dedup_check(
-                s2id=item.s2_id,
-                doi=item.doi,
-                pmid=item.pmid,
-                title=item.title,
-            )
+            return trellis.dedup_check_indexed(index, **identifiers)
+        return trellis.dedup_check(**identifiers)
+
+    for item in citations.items:
+        s2_id = item.s2_id
+        pmid = item.pmid
+        title = item.title
+        if ("s2_id", s2_id) in ambiguous:
+            s2_id = None
+        if ("pmid", pmid) in ambiguous:
+            pmid = None
+        if ("title", " ".join(title.casefold().split())) in ambiguous:
+            title = None
+        target = lookup(
+            s2id=s2_id if not item.doi else None,
+            doi=item.doi,
+            pmid=pmid,
+            title=title,
+        )
+        if not target and item.doi and s2_id:
+            target = lookup(s2id=s2_id)
+        if target and item.doi:
+            reference = trellis._reference_metadata(target)
+            known_dois = {
+                doi
+                for value in (
+                    target.get("uri"),
+                    reference.get("uri"),
+                    reference.get("doi"),
+                    _doi_from_node(target),
+                    *(reference.get("alt_dois") or []),
+                )
+                if (doi := bare_doi(value)) and doi.startswith("10.")
+            }
+            if known_dois and bare_doi(item.doi) not in known_dois:
+                target = None
         if not target:
             skipped += 1
             continue
@@ -1073,7 +1101,7 @@ def verify_outcome(slug: str, edge_count: int = 0) -> VerifyResult:
                 break
         return VerifyResult(
             node_exists=True,
-            has_citation_metadata=isinstance(items, list),
+            has_citation_metadata=isinstance(items, list) and bool(items),
             pipeline_status=pipeline_status,
             # Count of citation edges linked during this run, supplied from LinkResult.
             edge_count=edge_count,
@@ -1191,16 +1219,9 @@ def fetch_and_store(
     try:
         item_doi = _item_doi(items[idx])
         prefetched = prefetched_for_doi(item_doi) if item_doi else None
-        if prefetched is not None and prefetched.citations:
-            citations = CitationResult(
-                source="s2-batch",
-                retrieved_at=date.today().isoformat(),
-                items=prefetched.citations,
-            )
-        else:
-            # doi may be None for a title-only record that never resolved an
-            # identifier; outbound-citation fetch is DOI-keyed so it no-ops.
-            citations = fetch_outbound_citations(doi or "")
+        citations = fetch_outbound_citations(
+            doi or "", prefetched=prefetched.citations if prefetched else None
+        )
         outcome.citation_store = store_citations(slug, citations)
         return idx, slug, citations
     except Exception as e:
@@ -1271,6 +1292,13 @@ def set_final_pipeline_status(
     idx, _doi, slug = item
     outcome = outcomes[idx]
     try:
+        if not outcome.errors:
+            if not outcome.verify or not outcome.verify.node_exists:
+                outcome.errors.append("Node verification failed")
+            elif not outcome.verify.has_citation_metadata:
+                outcome.errors.append(
+                    "Citation enrichment incomplete: no usable bibliography"
+                )
         status = _classify_failure(outcome.errors) if outcome.errors else "digested"
         trellis.set_pipeline_status(slug, status)
         if outcome.errors:

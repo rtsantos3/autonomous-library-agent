@@ -9,12 +9,13 @@ import requests
 
 from pipeline._http import S2_LIMITER, http_post
 from pipeline._utils import bare_doi, extend_unique
-from pipeline.citations import CitationItem
+from pipeline.citation_types import CitationItem, text
 
 BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
 S2_BATCH_FIELDS = (
     "paperId,title,abstract,year,venue,authors,externalIds,fieldsOfStudy,"
-    "s2FieldsOfStudy,publicationTypes,references.externalIds,references.title,references.year"
+    "s2FieldsOfStudy,publicationTypes,references.externalIds,"
+    "references.title,references.year,references.paperId"
 )
 logger = logging.getLogger(__name__)
 
@@ -51,18 +52,21 @@ def _coerce_year(value) -> Optional[int]:
 def _citation_from_reference(ref: dict) -> Optional[CitationItem]:
     if not isinstance(ref, dict):
         return None
-    external_ids = (ref or {}).get("externalIds") or {}
-    doi = _normalize_doi(external_ids.get("DOI"))
+    external_ids = ref.get("externalIds") or {}
+    if not isinstance(external_ids, dict):
+        external_ids = {}
+    doi = bare_doi(text(external_ids.get("DOI")))
     pmid = external_ids.get("PubMed")
     if pmid is not None:
         pmid = str(pmid).strip() or None
-    title = ((ref or {}).get("title") or "").strip()
-    if doi is None and not title:
+    title = text(ref.get("title"))
+    s2_id = text(ref.get("paperId")) or None
+    if not any((doi, pmid, s2_id, title)):
         return None
     return CitationItem(
         doi=doi,
         pmid=pmid,
-        s2_id=None,
+        s2_id=s2_id,
         title=title,
         year=_coerce_year((ref or {}).get("year")),
     )
