@@ -5,13 +5,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline.citations import (  # noqa: E402
-    CitationItem,
-    CitationResult,
-    _parse_crossref,
-    _parse_s2,
-    merge_citations,
-)
+from pipeline.citation_types import CitationItem, CitationResult  # noqa: E402
+from pipeline.citations import merge_citations  # noqa: E402
+from pipeline.providers import crossref, semantic_scholar  # noqa: E402
 
 
 def result(source, *items):
@@ -44,7 +40,7 @@ def test_union_keeps_provider_exclusive_references_and_merges_doi_aliases():
     assert merge_citations(union, s2, crossref).items == union.items
 
 
-@pytest.mark.parametrize("identifier", ["pmid", "s2_id"])
+@pytest.mark.parametrize("identifier", ["pmid", "s2_id", "openalex_id", "omid"])
 def test_shared_identifier_enriches_missing_doi(identifier):
     first = CitationItem(None, None, None, "Original title", None)
     second = CitationItem("10.1234/target", None, None, "Corrected title", 2023)
@@ -97,7 +93,7 @@ def test_identical_titles_do_not_merge_conflicting_dois_or_ambiguous_targets():
 
 
 def test_crossref_uses_deposited_entries_not_reference_count_or_unstructured_titles():
-    parsed = _parse_crossref(
+    parsed = crossref.parse(
         {
             "message": {
                 "reference-count": 999,
@@ -126,17 +122,17 @@ def test_crossref_uses_deposited_entries_not_reference_count_or_unstructured_tit
 
 def test_publisher_withheld_references_remain_distinct_from_empty_bibliography():
     notice = "Notice: The following paper fields have been elided by the publisher: {'references'}."
-    withheld = _parse_s2(
+    withheld = semantic_scholar.parse(
         {"data": None, "citingPaperInfo": {"openAccessPdf": {"disclaimer": notice}}}
     )
-    empty = _parse_s2({"data": []})
+    empty = semantic_scholar.parse({"data": []})
     assert withheld.providers["semantic-scholar"] == {
         "status": "withheld",
         "notice": notice,
     }
     assert empty.providers["semantic-scholar"]["status"] == "empty"
     union = merge_citations(
-        withheld, _parse_crossref({"message": {"reference": [{"DOI": "10.1234/a"}]}})
+        withheld, crossref.parse({"message": {"reference": [{"DOI": "10.1234/a"}]}})
     )
     assert [item.doi for item in union.items] == ["10.1234/a"]
     assert union.items[0].sources == ["crossref"]
@@ -153,13 +149,13 @@ def test_publisher_withheld_references_remain_distinct_from_empty_bibliography()
     ],
 )
 def test_missing_crossref_bibliography_does_not_claim_available(payload, status):
-    parsed = _parse_crossref(payload)
+    parsed = crossref.parse(payload)
     assert parsed.items == []
     assert parsed.providers["crossref"]["status"] == status
 
 
 def test_s2_retains_identifier_only_references_and_normalizes_identifiers():
-    parsed = _parse_s2(
+    parsed = semantic_scholar.parse(
         {
             "data": [
                 {
@@ -182,3 +178,191 @@ def test_s2_retains_identifier_only_references_and_normalizes_identifiers():
         (None, "456", None, ""),
         (None, None, "s2-only", ""),
     ]
+
+
+def test_index_only_reference_is_enriched_without_losing_provider_provenance():
+    index_only = CitationItem(None, None, None, "", None, openalex_id="W123")
+    doi_bridge = CitationItem(
+        "10.1234/target", None, None, "Target", 2020, openalex_id="W123"
+    )
+    oc_bridge = CitationItem("10.1234/target", "456", None, "", None, omid="br/789")
+    omid_only = CitationItem(None, None, None, "", None, omid="br/789")
+    union = merge_citations(
+        result("openalex", index_only),
+        result("crossref", doi_bridge),
+        result("opencitations", oc_bridge),
+        result("europe-pmc", omid_only),
+        result(
+            "semantic-scholar",
+            CitationItem(None, "456", "s2-target", "Target", 2020),
+        ),
+    )
+    assert [
+        (item.doi, item.pmid, item.s2_id, item.openalex_id, item.omid)
+        for item in union.items
+    ] == [("10.1234/target", "456", "s2-target", "W123", "br/789")]
+    assert set(union.items[0].sources) == {
+        "semantic-scholar",
+        "crossref",
+        "europe-pmc",
+        "openalex",
+        "opencitations",
+    }
+
+
+@pytest.mark.parametrize("identifier", ["openalex_id", "omid"])
+def test_matching_index_id_does_not_merge_conflicting_dois(identifier):
+    first = CitationItem("10.1234/a", None, None, "Title", None)
+    second = CitationItem("10.1234/b", None, None, "Title", None)
+    setattr(first, identifier, "123")
+    setattr(second, identifier, "123")
+    union = merge_citations(result("openalex", first, second))
+    assert [item.doi for item in union.items] == ["10.1234/a", "10.1234/b"]
+
+
+@pytest.mark.parametrize("identifier", ["openalex_id", "omid"])
+def test_title_match_does_not_override_conflicting_index_ids(identifier):
+    first = CitationItem(None, None, None, "Shared title", None)
+    second = CitationItem(None, None, None, "Shared title", None)
+    setattr(first, identifier, "123")
+    setattr(second, identifier, "456")
+    union = merge_citations(result("openalex", first, second))
+    assert [getattr(item, identifier) for item in union.items] == ["123", "456"]
+
+
+def test_same_doi_merges_despite_a_pmid_shared_with_a_distinct_preprint():
+    union = merge_citations(
+        result(
+            "semantic-scholar",
+            CitationItem(
+                "10.1101/2020.11.19.388223",
+                "33944776",
+                "s2-preprint",
+                "bioBakery 3",
+                2020,
+            ),
+        ),
+        result(
+            "crossref",
+            CitationItem("10.7554/elife.65088", None, None, "", 2021),
+        ),
+        result(
+            "europe-pmc",
+            CitationItem(None, "33944776", None, "bioBakery 3", 2021),
+        ),
+        result(
+            "openalex",
+            CitationItem(
+                "10.7554/elife.65088",
+                "33944776",
+                None,
+                "bioBakery 3",
+                2021,
+                openalex_id="W3159504416",
+            ),
+        ),
+        result(
+            "opencitations",
+            CitationItem(
+                "10.7554/elife.65088", "33944776", None, "", None, omid="br/0640841103"
+            ),
+        ),
+    )
+    assert [item.doi for item in union.items] == [
+        "10.1101/2020.11.19.388223",
+        "10.7554/elife.65088",
+        None,
+    ]
+    assert union.items[1].sources == ["crossref", "openalex", "opencitations"]
+    assert (union.items[1].openalex_id, union.items[1].omid) == (
+        "W3159504416",
+        "br/0640841103",
+    )
+    assert (union.items[2].pmid, union.items[2].sources) == (
+        "33944776",
+        ["europe-pmc"],
+    )
+
+
+@pytest.mark.parametrize(
+    "order",
+    [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)],
+)
+@pytest.mark.parametrize("transitive", [False, True])
+def test_secondary_identifier_ambiguity_is_independent_of_provider_order(
+    order, transitive
+):
+    second_pmid = None if transitive else "123"
+    second_s2 = "s2-b" if transitive else None
+    records = [
+        result("crossref", CitationItem("10.1234/a", "123", None, "", None)),
+        result("openalex", CitationItem("10.1234/b", second_pmid, second_s2, "", None)),
+        result("europe-pmc", CitationItem(None, "123", second_s2, "", None)),
+    ]
+    union = merge_citations(*(records[idx] for idx in order))
+    assert {
+        (item.doi, item.pmid, item.s2_id, tuple(item.sources)) for item in union.items
+    } == {
+        ("10.1234/a", "123", None, ("crossref",)),
+        ("10.1234/b", second_pmid, second_s2, ("openalex",)),
+        (None, "123", second_s2, ("europe-pmc",)),
+    }
+
+
+def test_generic_doi_less_titles_do_not_make_unique_identifiers_ambiguous():
+    from itertools import permutations
+
+    records = [
+        result("crossref", CitationItem("10.1234/a", "123", None, "Article A", None)),
+        result("crossref", CitationItem("10.1234/b", None, "s2-b", "Article B", None)),
+        result("europe-pmc", CitationItem(None, "123", None, "Editorial", None)),
+        result("openalex", CitationItem(None, None, "s2-b", "Editorial", None)),
+    ]
+    for order in permutations(records):
+        union = merge_citations(*order)
+        assert {
+            (item.doi, item.pmid, item.s2_id, frozenset(item.sources))
+            for item in union.items
+        } == {
+            ("10.1234/a", "123", None, frozenset({"crossref", "europe-pmc"})),
+            ("10.1234/b", None, "s2-b", frozenset({"crossref", "openalex"})),
+        }
+
+
+def test_unambiguous_title_can_bridge_an_existing_identifier_only_group():
+    from itertools import permutations
+
+    records = [
+        result("crossref", CitationItem("10.1234/a", None, None, "Article A", None)),
+        result("europe-pmc", CitationItem(None, "123", None, "Article A", None)),
+        result("europe-pmc", CitationItem(None, "123", None, "Alternate title", None)),
+    ]
+    for order in permutations(records):
+        union = merge_citations(*order)
+        assert {
+            (item.doi, item.pmid, frozenset(item.sources)) for item in union.items
+        } == {("10.1234/a", "123", frozenset({"crossref", "europe-pmc"}))}
+
+
+def test_unanchored_title_bridges_do_not_choose_between_distinct_dois():
+    from itertools import permutations
+
+    records = [
+        result("crossref", CitationItem("10.1234/a", None, None, "Title X", None)),
+        result("crossref", CitationItem("10.1234/b", None, None, "Title Z", None)),
+        result("europe-pmc", CitationItem(None, "123", None, "Title X", None)),
+        result("europe-pmc", CitationItem(None, "123", None, "Title Y", None)),
+        result("openalex", CitationItem(None, None, "s2-b", "Title Y", None)),
+        result("openalex", CitationItem(None, None, "s2-b", "Title Z", None)),
+    ]
+    for order in permutations(records):
+        union = merge_citations(*order)
+        assert {
+            (item.doi, item.pmid, item.s2_id, frozenset(item.sources))
+            for item in union.items
+        } == {
+            ("10.1234/a", None, None, frozenset({"crossref"})),
+            ("10.1234/b", None, None, frozenset({"crossref"})),
+            (None, "123", None, frozenset({"europe-pmc"})),
+            (None, None, "s2-b", frozenset({"openalex"})),
+        }

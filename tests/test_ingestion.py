@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline import ingestion  # noqa: E402
 from pipeline.aggregator import BatchResolved  # noqa: E402
-from pipeline.citations import CitationItem, CitationResult  # noqa: E402
+from pipeline.citation_types import CitationItem, CitationResult  # noqa: E402
 from pipeline.ingestion import (  # noqa: E402
     DedupResult,
     ParseResult,
@@ -1537,8 +1537,10 @@ class TestRisPipelineIntegration:
         outcomes, _ = ingestion.ingest_batch([dict(record), dict(record)])
 
         assert len(outcomes) == 2
-        assert outcomes[0].errors == []
-        assert outcomes[1].errors == []
+        assert all(
+            ingestion._classify_failure(outcome.errors) == "needs-review"
+            for outcome in outcomes
+        )
         # Exactly one create; the second record dedups onto the first.
         created = [o.upsert.created for o in outcomes]
         assert created.count(True) == 1
@@ -1550,6 +1552,9 @@ class TestRisPipelineIntegration:
             ingestion.trellis.get_node(o.upsert.slug).get("id") for o in outcomes
         }
         assert len(node_ids) == 1
+        stored = ingestion.trellis.get_node(next(iter(node_ids)))
+        assert "pipeline:needs-review" in stored["tags"]
+        assert "pipeline:digested" not in stored["tags"]
 
         # The graph holds exactly one node for this DOI-bearing title.
         matches = ingestion.trellis.find_nodes(text=title)
@@ -1624,7 +1629,8 @@ class TestRisPipelineIntegration:
 @pytest.mark.integration
 class TestCitationCompleteness:
     @pytest.mark.parametrize(
-        "provider_status", ["empty", "withheld", "unavailable", "failed"]
+        "provider_status",
+        ["empty", "withheld", "unavailable", "failed", "available", "partial"],
     )
     def test_empty_bibliography_never_reaches_digested(
         self, ephemeral_trellis, provider_status
@@ -1655,10 +1661,17 @@ class TestCitationCompleteness:
         assert outbound["status"] == "incomplete"
         assert outbound["providers"]["semantic-scholar"]["status"] == provider_status
 
-    def test_crossref_union_repairs_only_existing_targets_idempotently(
+    def test_provider_union_repairs_only_existing_targets_idempotently(
         self, ephemeral_trellis
     ):
-        from pipeline.citations import _parse_crossref, _parse_s2, merge_citations
+        from pipeline.citations import merge_citations
+        from pipeline.providers import (
+            crossref,
+            europe_pmc,
+            openalex,
+            opencitations,
+            semantic_scholar,
+        )
 
         source = ingestion.trellis.add_reference(
             "Citing review",
@@ -1671,13 +1684,13 @@ class TestCitationCompleteness:
                 metadata={"reference": {"doi": f"10.9999/target-{i}"}},
                 actor_id="CODEX",
             )
-            for i in range(2)
+            for i in range(4)
         ]
         citations = merge_citations(
-            _parse_s2(
+            semantic_scholar.parse(
                 {"data": [{"citedPaper": {"externalIds": {"DOI": "10.9999/target-0"}}}]}
             ),
-            _parse_crossref(
+            crossref.parse(
                 {
                     "message": {
                         "reference": [
@@ -1688,6 +1701,19 @@ class TestCitationCompleteness:
                         ]
                     }
                 }
+            ),
+            europe_pmc.parse_references(
+                {
+                    "hitCount": 1,
+                    "referenceList": {"reference": [{"doi": "10.9999/target-2"}]},
+                }
+            ),
+            openalex.parse(
+                {"referenced_works": ["W123"]},
+                [{"results": [{"id": "W123", "doi": "10.9999/target-3"}]}],
+            ),
+            opencitations.parse_references(
+                [{"cited": "doi:10.9999/target-3 omid:br/456"}]
             ),
         )
         slug = source["id"]
@@ -1716,7 +1742,7 @@ class TestCitationCompleteness:
                     conn.execute(
                         "SELECT COUNT(*) FROM edges WHERE relationship = 'references'"
                     ).fetchone()[0]
-                    == 2
+                    == 4
                 )
             assert {
                 node["id"]
@@ -1727,3 +1753,120 @@ class TestCitationCompleteness:
             assert "pipeline:digested" in stored["tags"]
             shared = stored["metadata"]["reference"]["outbound_citations"]["items"][0]
             assert shared["sources"] == ["semantic-scholar", "crossref"]
+            indexed = next(
+                item
+                for item in stored["metadata"]["reference"]["outbound_citations"][
+                    "items"
+                ]
+                if item["doi"] == "10.9999/target-3"
+            )
+            assert (indexed["openalex_id"], indexed["omid"]) == ("W123", "br/456")
+            assert indexed["sources"] == ["openalex", "opencitations"]
+
+    @pytest.mark.parametrize("indexed", [False, True])
+    @pytest.mark.parametrize("exact_target_exists", [False, True])
+    def test_citation_doi_takes_precedence_over_conflicting_secondary_ids(
+        self, ephemeral_trellis, indexed, exact_target_exists
+    ):
+        source = ingestion.trellis.add_reference(
+            "Source paper",
+            metadata={"reference": {"doi": "10.9999/source"}},
+            actor_id="CODEX",
+        )
+        ingestion.trellis.add_reference(
+            "Different preprint",
+            metadata={"reference": {"doi": "10.9999/preprint"}},
+            tags=["pmid:123", "s2id:s2-shared"],
+            actor_id="CODEX",
+        )
+        target = None
+        if exact_target_exists:
+            target = ingestion.trellis.add_reference(
+                "Published paper",
+                metadata={"reference": {"doi": "10.9999/published"}},
+                actor_id="CODEX",
+            )
+        citations = citation_result(
+            [
+                CitationItem(
+                    "10.9999/published", "123", "s2-shared", "Published paper", 2020
+                )
+            ]
+        )
+        before = ingestion.trellis.build_edge_index()
+        result = ingestion.link_citations(
+            source["id"],
+            citations,
+            index=ingestion.trellis.build_node_index() if indexed else None,
+            edge_index=set(before),
+        )
+        expected = (
+            {
+                (
+                    source["id"].replace("-", ""),
+                    target["id"].replace("-", ""),
+                    "references",
+                )
+            }
+            if target
+            else set()
+        )
+        assert ingestion.trellis.build_edge_index() == before | expected
+        assert result.linked == int(exact_target_exists)
+
+    @pytest.mark.parametrize("identifier", ["pmid", "s2_id"])
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    def test_doi_less_target_requires_unambiguous_secondary_identity(
+        self, ephemeral_trellis, identifier, ambiguous
+    ):
+        source = ingestion.trellis.add_reference(
+            "Source paper",
+            metadata={"reference": {"doi": "10.9999/source"}},
+            actor_id="CODEX",
+        )
+        tag = "pmid:123" if identifier == "pmid" else "s2id:s2-b"
+        target = ingestion.trellis.add_reference(
+            "Unresolved target",
+            metadata={"reference": {"url": "https://pubmed.ncbi.nlm.nih.gov/123/"}},
+            tags=[tag],
+            actor_id="CODEX",
+        )
+        citations = citation_result(
+            [
+                CitationItem("10.9999/a", "123", None, "", None),
+                CitationItem(None, "123", "s2-b", "", None),
+                CitationItem("10.9999/b", None, "s2-b", "", None),
+            ]
+            if ambiguous
+            else [
+                CitationItem(
+                    "10.9999/a",
+                    "123" if identifier == "pmid" else None,
+                    "s2-b" if identifier == "s2_id" else None,
+                    "",
+                    None,
+                )
+            ]
+        )
+        before = ingestion.trellis.build_edge_index()
+        result = ingestion.link_citations(
+            source["id"],
+            citations,
+            index=ingestion.trellis.build_node_index(),
+            edge_index=set(before),
+        )
+        expected = (
+            set()
+            if ambiguous
+            else {
+                (
+                    source["id"].replace("-", ""),
+                    target["id"].replace("-", ""),
+                    "references",
+                )
+            }
+        )
+        assert ingestion.trellis.build_edge_index() == before | expected
+        assert result == ingestion.LinkResult(
+            linked=int(not ambiguous), skipped=3 if ambiguous else 0
+        )

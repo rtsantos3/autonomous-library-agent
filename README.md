@@ -174,14 +174,38 @@ bibliographies finish as `pipeline:needs-review`, not `pipeline:digested`.
 The pipeline never emits `pipeline:scaffolded` (a legacy stub state from the
 retired single-paper scaffolder).
 
-**Citation collection:** Semantic Scholar and Crossref both contribute references;
-Crossref is not only a fallback. Non-empty S2 batch references are reused, and
-per-paper S2 requests follow pagination. The union deduplicates normalized DOIs,
-PMIDs, and S2 IDs. Exact, unambiguous title matches can enrich identifier-poor
-references; conflicting DOIs stay separate. Each item records its `sources`.
+**Citation collection:** Semantic Scholar, Crossref, Europe PMC, OpenAlex, and
+OpenCitations all contribute indexed outbound references. Retrieval is a union,
+not a fallback chain. Non-empty S2 batch references are reused. S2 and Europe PMC
+retrieval follows pagination; OpenAlex hydrates indexed targets in bounded batches.
+S2 batch parsing retains PMID-only and S2-ID-only references. Europe PMC skips
+exact-DOI search hits that explicitly report no references.
+No provider adapter retrieves full text.
+
+Each module in `pipeline/providers/` exposes `retrieve(doi) -> CitationResult`.
+Shared records live in `pipeline/citation_types.py`; `pipeline/citations.py` owns
+collection and deduplication. Provider changes do not change the intake entrypoint
+or the `outbound_citations` envelope. Items retain DOI, PMID, S2 ID, title, year,
+and `sources`, with optional `openalex_id` and `omid` for index-only references.
+
+The union deduplicates normalized DOIs, PMIDs, S2 IDs, OpenAlex IDs, and OMIDs.
+Exact, unambiguous title matches can enrich identifier-poor references. Distinct
+DOIs stay separate, even when a preprint and journal article share a PMID.
+Conflicting secondary identifiers do not prevent an exact DOI merge.
+Ambiguity is resolved across the full input, including identifier-only bridges.
+Generic titles do not override stable identifiers. Citation linking prefers the
+cited DOI and rejects conflicting known DOIs. Ambiguous secondary identifiers
+cannot select a target; non-DOI URLs are not treated as DOI conflicts.
 `outbound_citations.providers` records provider outcomes and publisher notices.
-`outbound_citations.status` is `available` or `incomplete`. Available means that
-usable references were collected, not that the bibliography is exhaustive.
+A failed provider does not discard other providers' references. Partial OpenAlex
+hydration retains the known target IDs. `outbound_citations.status` is `available`
+or `incomplete`; available does not assert an exhaustive bibliography.
+Only a non-empty **stored citation list** permits `pipeline:digested`. Provider
+status labels alone are insufficient. Zero links to existing library papers are
+allowed; an empty stored bibliography finishes as `pipeline:needs-review`.
+
+The [provider PRD](docs/citation_provider_prd.md) defines the output contract,
+identity rules, and acceptance criteria.
 
 To repair an existing paper without replaying Slack uploads, run the same pipeline
 against its DOI in the intended workspace:
@@ -212,6 +236,8 @@ the graph from a committed export if one exists, and runs the offline test suite
 
 Then edit `.env` with your keys (`NCBI_API_KEY`, `S2_API_KEY`, `CROSSREF_EMAIL`,
 `UNPAYWALL_EMAIL`) and activate the env (`conda activate autonomous-library-agent`).
+`OPENALEX_API_KEY` and `OPENCITATIONS_ACCESS_TOKEN` are optional retrieval
+credentials. Europe PMC needs no key. Unauthenticated service limits still apply.
 
 ## Usage
 

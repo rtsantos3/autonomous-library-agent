@@ -44,7 +44,8 @@ from pipeline._utils import (
     pub_type_slug,
     slugify,
 )
-from pipeline.citations import CitationResult, fetch_outbound_citations
+from pipeline.citation_types import CitationResult
+from pipeline.citations import ambiguous_citation_keys, fetch_outbound_citations
 from pipeline.trellis import _doi_key, _norm_title
 
 if TYPE_CHECKING:
@@ -1005,22 +1006,46 @@ def link_citations(
     skipped = 0
     source_uuid = slug if trellis._is_uuid(slug) else trellis._resolve_to_uuid(slug)
     source_ref = source_uuid or slug
-    for item in citations.items:
+    ambiguous = ambiguous_citation_keys(citations.items)
+
+    def lookup(**identifiers):
         if index is not None:
-            target = trellis.dedup_check_indexed(
-                index,
-                s2id=item.s2_id,
-                doi=item.doi,
-                pmid=item.pmid,
-                title=item.title,
-            )
-        else:
-            target = trellis.dedup_check(
-                s2id=item.s2_id,
-                doi=item.doi,
-                pmid=item.pmid,
-                title=item.title,
-            )
+            return trellis.dedup_check_indexed(index, **identifiers)
+        return trellis.dedup_check(**identifiers)
+
+    for item in citations.items:
+        s2_id = item.s2_id
+        pmid = item.pmid
+        title = item.title
+        if ("s2_id", s2_id) in ambiguous:
+            s2_id = None
+        if ("pmid", pmid) in ambiguous:
+            pmid = None
+        if ("title", " ".join(title.casefold().split())) in ambiguous:
+            title = None
+        target = lookup(
+            s2id=s2_id if not item.doi else None,
+            doi=item.doi,
+            pmid=pmid,
+            title=title,
+        )
+        if not target and item.doi and s2_id:
+            target = lookup(s2id=s2_id)
+        if target and item.doi:
+            reference = trellis._reference_metadata(target)
+            known_dois = {
+                doi
+                for value in (
+                    target.get("uri"),
+                    reference.get("uri"),
+                    reference.get("doi"),
+                    _doi_from_node(target),
+                    *(reference.get("alt_dois") or []),
+                )
+                if (doi := bare_doi(value)) and doi.startswith("10.")
+            }
+            if known_dois and bare_doi(item.doi) not in known_dois:
+                target = None
         if not target:
             skipped += 1
             continue

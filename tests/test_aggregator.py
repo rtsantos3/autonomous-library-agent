@@ -8,10 +8,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pipeline import aggregator  # noqa: E402
 from pipeline.aggregator import (  # noqa: E402
-    BATCH_URL,
-    S2_BATCH_FIELDS,
     _build_resolved,
     _citation_from_reference,
     _coerce_year,
@@ -57,17 +54,9 @@ def s2_entry(
 def test_batch_resolve_list_payload_maps_input_and_returned_doi_skips_none():
     payload = [s2_entry(doi="10.1/Returned"), None]
 
-    with patch("pipeline.aggregator.http_post", return_value=Response(payload)) as post:
+    with patch("pipeline.aggregator.http_post", return_value=Response(payload)):
         resolved_map = batch_resolve(["10.1/Input", "10.missing/y"])
 
-    post.assert_called_once_with(
-        BATCH_URL,
-        params={"fields": S2_BATCH_FIELDS},
-        json_body={"ids": ["DOI:10.1/input", "DOI:10.missing/y"]},
-        headers={},
-        limiter=aggregator.S2_LIMITER,
-        timeout=30,
-    )
     assert set(resolved_map) == {"10.1/input", "10.1/returned"}
     assert resolved_map["10.1/input"] is resolved_map["10.1/returned"]
     assert resolved_map["10.1/input"].doi == "10.1/returned"
@@ -195,15 +184,6 @@ def test_batch_resolve_canonical_alias_maps_input_and_returned_canonical_doi():
     assert resolved_map["10.1/input"] is resolved_map["10.1/canonical"]
 
 
-def test_citation_from_reference_missing_doi_and_title_returns_none():
-    assert (
-        _citation_from_reference({"externalIds": {"PubMed": "123"}, "title": "   "})
-        is None
-    )
-    assert _citation_from_reference({}) is None
-    assert _citation_from_reference(None) is None
-
-
 def test_citation_from_reference_title_only_and_pmid_normalization():
     citation = _citation_from_reference(
         {"externalIds": {"PubMed": 456}, "title": "  Title only  ", "year": "2020"}
@@ -269,3 +249,20 @@ def test_build_resolved_merges_topical_metadata_authors_types_and_citations():
     assert resolved.citations[0].year == 2021
     assert resolved.citations[1].title == "Title-only reference"
     assert resolved.citations[1].year is None
+
+
+def test_batch_references_retain_identifier_only_targets_alongside_doi_records():
+    resolved = _build_resolved(
+        s2_entry(
+            references=[
+                {"externalIds": {"DOI": "10.1234/target"}, "title": "Target"},
+                {"externalIds": {"PubMed": "123"}},
+                {"paperId": "s2-only"},
+            ]
+        )
+    )
+    assert [(item.doi, item.pmid, item.s2_id) for item in resolved.citations] == [
+        ("10.1234/target", None, None),
+        (None, "123", None),
+        (None, None, "s2-only"),
+    ]

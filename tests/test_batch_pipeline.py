@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline import ingestion  # noqa: E402
 from pipeline.aggregator import BatchResolved  # noqa: E402
-from pipeline.citations import CitationItem, CitationResult  # noqa: E402
+from pipeline.citation_types import CitationItem, CitationResult  # noqa: E402
 from pipeline.ingestion import (  # noqa: E402
     DedupResult,
     IngestionOutcome,

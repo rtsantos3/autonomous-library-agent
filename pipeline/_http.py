@@ -25,6 +25,9 @@ class _RateLimiter:
 NCBI_LIMITER = _RateLimiter(0.11 if os.getenv("NCBI_API_KEY") else 0.34)
 S2_LIMITER = _RateLimiter(1.05)
 CROSSREF_LIMITER = _RateLimiter(0.2)
+EUROPE_PMC_LIMITER = _RateLimiter(0.34)
+OPENALEX_LIMITER = _RateLimiter(0.2)
+OPENCITATIONS_LIMITER = _RateLimiter(0.34)
 
 
 def http_get(

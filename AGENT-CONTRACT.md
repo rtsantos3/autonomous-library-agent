@@ -272,17 +272,36 @@ final = "digested" if not o.errors else _classify_failure(o.errors)
 | — | `build_node_index` | Rebuild so later phases see nodes created in phase 1. |
 | — | `reverse_materialize` | Link **inbound** citations: existing graph nodes that cite this paper get a `references` edge to it. |
 | — | `build_edge_index` | Snapshot existing edges so linking is idempotent (works around the lack of an edge-uniqueness constraint). |
-| 2 | `fetch_and_store` | Collect and deduplicate **both** Semantic Scholar and Crossref outbound references. Reuse non-empty S2 batch data; paginate per-paper S2 requests. Store the union, per-item sources, and provider outcomes in `metadata.reference.outbound_citations`. |
+| 2 | `fetch_and_store` | Union and deduplicate indexed outbound references from Semantic Scholar, Crossref, Europe PMC, OpenAlex, and OpenCitations. Reuse non-empty S2 batch data; paginate S2 and Europe PMC; batch OpenAlex target hydration. Store the union, per-item sources, and provider outcomes in `metadata.reference.outbound_citations`. |
 | 3 | `link_stored` | Materialize `references` edges to every cited target already present in the graph. |
 | 4 | `verify_outcome` | Confirm the node exists and has a non-empty bibliography; report this run's linked edge count. |
 | 5 | `set_final_pipeline_status` | Set `pipeline:digested` after successful verification. Empty or unavailable bibliographies add an incomplete-enrichment error and finish as `pipeline:needs-review`; other errors remain classified as `needs-review` / `failed`. |
+
+Each module in `pipeline/providers/` implements `retrieve(doi) -> CitationResult`.
+All providers use `CitationItem` and `CitationResult` from
+`pipeline/citation_types.py`. Intake and persistence remain provider-independent.
+Adapters retrieve indexed references only, not full text.
 
 Citation metadata uses `status: available` when usable references exist and
 `status: incomplete` otherwise. Available does not assert exhaustive coverage.
 `providers` distinguishes empty, unavailable, publisher-withheld, failed, and
 partial responses. Publisher notices are retained. Each reference has a `sources`
-list. Re-run `ingest_batch([doi])` to repair an existing paper in place; do not
-replay Slack uploads. Linking uses existing nodes only and is idempotent.
+list. Optional `openalex_id` and `omid` fields preserve index-only targets.
+Deduplication uses identifiers and unambiguous exact titles. Distinct DOIs remain
+separate; a shared PMID must not duplicate an already-matched DOI.
+Resolve direct and transitive ambiguity across the full citation input before
+merging. Generic titles cannot override stable-ID anchors. Citation linking
+prefers the cited DOI and rejects conflicting known DOIs. Suppress ambiguous
+secondary identifiers for every lookup, including DOI-bearing fallbacks. A
+non-DOI URL is a locator, not a DOI conflict.
+Provider failures do not discard other providers' results. Failed or incomplete
+OpenAlex hydration preserves known referenced IDs.
+
+Zero stored citation records must not reach `pipeline:digested`, regardless of
+provider status labels. Zero outgoing graph links are allowed when the stored
+bibliography is non-empty. Re-run `ingest_batch([doi])` to repair an existing paper
+in place; do not replay Slack uploads. Linking uses existing nodes only and is
+idempotent.
 
 ### Enrichment (`resolve_identity`)
 
