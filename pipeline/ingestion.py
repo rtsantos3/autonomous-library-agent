@@ -1458,7 +1458,7 @@ def backfill_nodes(
 
 
 def ingest_batch(
-    items: "list[str | dict]", workers: int = 8
+    items: "list[str | dict]", workers: int = 8, ris_sink=None
 ) -> tuple[list[IngestionOutcome], BatchMetrics]:
     # items: a list whose elements are either bare DOI strings (historical
     # contract) or full record dicts (e.g. RIS entries, possibly DOI-less).
@@ -1466,6 +1466,8 @@ def ingest_batch(
     # inside resolve_and_upsert. DOI strings still drive the S2 batch prefetch;
     # dict records contribute their DOI to the prefetch when they have one and
     # otherwise fall back to per-paper enrichment in resolve_identity.
+    # ris_sink: optional callable (e.g. RisSink().append) that receives every
+    # resolved paper; None defers to RIS_SINK_PATH (see pipeline.ris_sink).
     batch_t0 = time.perf_counter()
     phases: list[PhaseMetrics] = []
 
@@ -1597,6 +1599,21 @@ def ingest_batch(
         )
     elapsed = time.perf_counter() - t0
     add_phase("phase5 status", elapsed, len(upserted))
+
+    # RIS sink: a side output of resolution, independent of Trellis. Runs on the
+    # main thread after all phases; a sink failure is logged, never fatal.
+    from pipeline.ris_sink import sink_from_env
+
+    sink = ris_sink if ris_sink is not None else sink_from_env()
+    if sink is not None:
+        for outcome in outcomes:
+            if outcome.resolve and outcome.resolve.title:
+                try:
+                    sink(outcome.resolve)
+                except Exception as exc:
+                    logger.warning(
+                        "ris_sink failed for %r: %s", outcome.resolve.title, exc
+                    )
 
     metrics = BatchMetrics(
         phases=phases,

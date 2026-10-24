@@ -62,6 +62,16 @@ def _workspace() -> str:
 # Back-compat module constant: the workspace as resolved at import time.
 PROJECT_ROOT = _workspace()
 PROJECT_SLUG = "microbiome-research-library"
+
+
+def _project_slug() -> str:
+    # Parent project for pipeline-created references, resolved per call like
+    # _workspace(). TRELLIS_PROJECT_SLUG overrides the default so another
+    # workspace (e.g. a personal vault) can host new references under its own
+    # existing node.
+    return os.environ.get("TRELLIS_PROJECT_SLUG") or PROJECT_SLUG
+
+
 ACTOR = "daedalus"
 logger = logging.getLogger(__name__)
 
@@ -329,7 +339,7 @@ def add_reference(
         args += ["--tags", ",".join(tags)]
     if file_path:
         args += ["--file", file_path]
-    args += ["--parent", PROJECT_SLUG, "--actor-id", actor_id, "--json"]
+    args += ["--parent", _project_slug(), "--actor-id", actor_id, "--json"]
     return _unwrap_node(_run_json(*args))
 
 
@@ -339,6 +349,7 @@ def update_node(
     abstract: str = None,
     citation: str = None,
     metadata: dict = None,
+    file_path: str = None,
     actor_id: str = ACTOR,
 ) -> dict:
     """
@@ -355,6 +366,8 @@ def update_node(
         args += ["--citation", citation]
     if metadata is not None:
         args += ["--metadata", json.dumps(metadata)]
+    if file_path is not None:
+        args += ["--file", file_path]
     args += ["--actor-id", actor_id, "--json"]
     return _unwrap_node(_run_json(*args))
 
