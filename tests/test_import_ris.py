@@ -278,3 +278,105 @@ def test_project_slug_env_overrides_add_reference_parent(monkeypatch):
     monkeypatch.setenv("TRELLIS_PROJECT_SLUG", "references")
     trellis.add_reference("A Paper Title For Parent Test", uri="https://doi.org/10.1/x")
     assert calls[-1][calls[-1].index("--parent") + 1] == "references"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the PR #9 review findings
+# ---------------------------------------------------------------------------
+
+
+def _main(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["import_ris_network.py", *map(str, argv)])
+    monkeypatch.setattr(import_ris_network, "load_dotenv", lambda: None)
+    return import_ris_network.main()
+
+
+def test_default_sink_path_is_collected_when_no_sink_configured(
+    tmp_path, monkeypatch, capsys
+):
+    # Review finding 1: with neither --ris-sink nor RIS_SINK_PATH, a file that
+    # happens to sit at the default sink path is ordinary input.
+    folder = tmp_path / "references"
+    folder.mkdir()
+    default = folder / "library.ris"
+    default.write_text(_ONE_RIS, encoding="utf-8")
+    monkeypatch.setattr(ris_sink, "DEFAULT_PATH", default)
+    monkeypatch.delenv("RIS_SINK_PATH", raising=False)
+    monkeypatch.setenv("TRELLIS_WORKSPACE", str(tmp_path))
+    assert _main(monkeypatch, folder, "--dry-run") == 0
+    assert "files     : 1" in capsys.readouterr().out
+
+
+def test_append_dedups_stored_url_and_prefix_doi_forms(tmp_path):
+    # Review finding 2: stored DOIs in URL or doi: form must match a bare DOI.
+    path = tmp_path / "lib.ris"
+    path.write_text(
+        "TY  - JOUR\nTI  - Stored A\nDO  - https://doi.org/10.1/ABC\nER  - \n\n"
+        "TY  - JOUR\nTI  - Stored B\nDO  - doi:10.2/XYZ.\nER  - \n\n",
+        encoding="utf-8",
+    )
+    sink = RisSink(path)
+    assert sink.append({"title": "New A", "doi": "10.1/abc"}) is False
+    assert (
+        sink.append({"title": "New B", "doi": "https://dx.doi.org/10.2/xyz"}) is False
+    )
+    assert path.read_text(encoding="utf-8").count("ER  -") == 2
+
+
+def test_archive_never_overwrites_same_basename(tmp_path):
+    # Review finding 3: two inputs with one basename must both survive.
+    for name, body in (("a", "first"), ("b", "second")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "paper.ris").write_text(body, encoding="utf-8")
+    archive = tmp_path / "imported"
+    import_ris_network.archive_files(
+        [tmp_path / "a" / "paper.ris", tmp_path / "b" / "paper.ris"], archive
+    )
+    bodies = sorted(p.read_text(encoding="utf-8") for p in archive.iterdir())
+    assert bodies == ["first", "second"]
+
+
+def test_note_bind_failure_is_an_error_and_blocks_archive(
+    tmp_path, monkeypatch, capsys
+):
+    # Review finding 4: a note failure after node creation is reported and
+    # counted, so the RIS file stays in the drop folder for a retry.
+    from types import SimpleNamespace
+
+    folder = tmp_path / "references"
+    folder.mkdir()
+    ris = folder / "in.ris"
+    ris.write_text(_ONE_RIS, encoding="utf-8")
+    monkeypatch.setenv("TRELLIS_WORKSPACE", str(tmp_path))
+    monkeypatch.delenv("RIS_SINK_PATH", raising=False)
+    monkeypatch.setattr(trellis, "get_node", lambda slug: {"slug": slug})
+    outcome = SimpleNamespace(
+        errors=[],
+        link=None,
+        upsert=SimpleNamespace(created=True, slug="some-paper"),
+    )
+    monkeypatch.setattr(
+        import_ris_network, "ingest_batch", lambda items, **kw: ([outcome], None)
+    )
+
+    def refuse_bind(*args, **kwargs):
+        raise RuntimeError("bind refused")
+
+    monkeypatch.setattr(trellis, "update_node", refuse_bind)
+    code = _main(
+        monkeypatch,
+        folder,
+        "--parent",
+        "references",
+        "--no-crossref",
+        "--notes-dir",
+        folder,
+        "--archive",
+        folder / "imported",
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "note error (bind refused)" in out
+    assert "errors=1" in out
+    assert ris.exists()  # not archived
+    assert "archive   : skipped" in out
