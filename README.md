@@ -96,6 +96,9 @@ The library a run targets is resolved with this precedence:
 TRELLIS_WORKSPACE (env or .env)  >  config.yml `workspace:`  >  parent of this repo
 ```
 
+New references are parented under `microbiome-research-library`, or under the
+existing node named by `TRELLIS_PROJECT_SLUG` (the RIS importer's `--parent`).
+
 `pipeline.trellis`, `setup.sh`, and `export_graph.sh` follow this (`setup.sh` also
 reads `TRELLIS_WORKSPACE` from `.env`). `scripts/monitor.py` currently honours only
 the `TRELLIS_WORKSPACE` env var, not `config.yml`.
@@ -250,6 +253,19 @@ o,m=ingest_batch(dois); print(len(o),'ingested')"
 
 # import an RIS file/dir end-to-end (parse → ingest_batch: enrich + dedup + link)
 python scripts/import_ris_network.py path/to/library.ris
+
+# RIS drop folder in another workspace (e.g. a personal vault): parent new
+# references under an existing node, write stub notes, archive processed files,
+# resolve DOI-less records by exact Crossref title, and sink results to RIS
+TRELLIS_WORKSPACE=~/git_repos/vault python scripts/import_ris_network.py \
+  ~/git_repos/vault/references --parent references \
+  --notes-dir ~/git_repos/vault/references \
+  --archive ~/git_repos/vault/references/imported --ris-sink
+
+# RIS sink: append every resolved paper to an RIS file (deduped by DOI/title).
+# Intake hook: ingest_batch(items, ris_sink=RisSink(path)), or set RIS_SINK_PATH.
+# Callable:    from pipeline.ris_sink import RisSink; RisSink(path).append(paper)
+# Default path: ~/git_repos/vault/references/library.ris
 
 # resumable backfill: (re)process nodes already in the graph, selected by status
 python scripts/backfill.py --statuses queued,scaffolded,failed

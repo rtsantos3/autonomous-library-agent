@@ -380,7 +380,7 @@ in **Trellis Status Tags**.
 | `method` | Methods or tools referenced in literature. |
 | `dataset` | Datasets referenced in literature. |
 
-Every ingested paper must produce at minimum one `reference` node under `microbiome-research-library`. Downstream `finding`, `hypothesis`, `method`, and `dataset` nodes are extracted during digestion and linked to their parent `reference`.
+Every ingested paper must produce at minimum one `reference` node under the parent project: `microbiome-research-library` by default, or the existing node named by `TRELLIS_PROJECT_SLUG` (`--parent` on the RIS importer). Downstream `finding`, `hypothesis`, `method`, and `dataset` nodes are extracted during digestion and linked to their parent `reference`.
 
 ---
 
