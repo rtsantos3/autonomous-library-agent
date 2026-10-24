@@ -283,10 +283,16 @@ def write_stub_note(record: RisRecord, notes_dir: Path, source: str) -> Optional
 
 
 def archive_files(files: list[Path], archive_dir: Path) -> None:
+    """Move files into archive_dir as <date>-<name>; never overwrite."""
     archive_dir.mkdir(parents=True, exist_ok=True)
     stamp = date.today().isoformat()
     for path in files:
-        shutil.move(str(path), archive_dir / f"{stamp}-{path.name}")
+        dest = archive_dir / f"{stamp}-{path.name}"
+        n = 1
+        while dest.exists():
+            dest = archive_dir / f"{stamp}-{path.stem}-{n}{path.suffix}"
+            n += 1
+        shutil.move(str(path), dest)
 
 
 def main() -> int:
@@ -359,11 +365,12 @@ def main() -> int:
     if args.archive:
         archive = args.archive.resolve()
         ris_files = [p for p in ris_files if archive not in p.resolve().parents]
-    # Never read (or archive) the sink's own output as input — whether the sink
-    # comes from --ris-sink or from RIS_SINK_PATH via the intake hook.
+    # Never read (or archive) the sink's own output as input, but only when a
+    # sink is configured (--ris-sink or RIS_SINK_PATH); otherwise collect as-is.
     sink = RisSink(args.ris_sink or None) if args.ris_sink is not None else None
-    sink_path = (sink or RisSink()).path.resolve()
-    ris_files = [p for p in ris_files if p.resolve() != sink_path]
+    if sink or os.environ.get("RIS_SINK_PATH"):
+        sink_path = (sink or RisSink()).path.resolve()
+        ris_files = [p for p in ris_files if p.resolve() != sink_path]
     if not ris_files:
         print(f"no RIS files found under {root}")
         return 1
@@ -449,13 +456,21 @@ def main() -> int:
                 f"status={status}  edges={edges}"
             )
             if notes_dir:
-                notes_dir.mkdir(parents=True, exist_ok=True)
-                note = write_stub_note(record, notes_dir, root.name)
-                if note:
-                    rel = note.relative_to(workspace).as_posix()
-                    trellis.update_node(outcome.upsert.slug, file_path=rel)
-                    notes += 1
-                    print(f"         -> note     {rel}")
+                note = None
+                try:
+                    notes_dir.mkdir(parents=True, exist_ok=True)
+                    note = write_stub_note(record, notes_dir, root.name)
+                    if note:
+                        rel = note.relative_to(workspace).as_posix()
+                        trellis.update_node(outcome.upsert.slug, file_path=rel)
+                        notes += 1
+                        print(f"         -> note     {rel}")
+                except Exception as exc:
+                    # Node exists; the note step failed. Count it as an error so
+                    # the RIS file is not archived, and say what was left behind.
+                    errored += 1
+                    left = f"note written but unbound: {note}" if note else "no note"
+                    print(f"         -> note error ({exc}); node kept, {left}")
         else:
             updated += 1
             slug = outcome.upsert.slug if outcome.upsert else "?"

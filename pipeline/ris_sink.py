@@ -77,9 +77,18 @@ def format_record(paper: Any) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _bare_doi(doi: Optional[str]) -> str:
+    """Normalize DOI spellings (doi:, doi.org URLs, case) to one dedup key."""
+    value = (doi or "").strip()
+    value = re.sub(r"^doi:\s*", "", value, flags=re.I)
+    value = re.sub(r"^https?://(dx\.)?doi\.org/", "", value, flags=re.I)
+    return value.strip().rstrip(" .;,").lower()
+
+
 def _record_key(doi: Optional[str], title: Optional[str]) -> str:
-    if doi:
-        return "doi:" + doi.strip().lower()
+    bare = _bare_doi(doi)
+    if bare:
+        return "doi:" + bare
     return "title:" + _norm_title(title or "")
 
 
