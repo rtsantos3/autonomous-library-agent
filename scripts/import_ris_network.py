@@ -23,9 +23,12 @@ deduplication, enrichment, and edge linking belong to the pipeline.
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -35,8 +38,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from pipeline import trellis  # noqa: E402
+from pipeline._http import CROSSREF_LIMITER, http_get  # noqa: E402
 from pipeline.ingestion import _classify_failure, ingest_batch  # noqa: E402
-from pipeline.trellis import _workspace  # noqa: E402
+from pipeline.ris_sink import RisSink  # noqa: E402
+from pipeline.trellis import _norm_title, _workspace  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # RIS model
@@ -203,6 +209,86 @@ def _outcome_status(outcome) -> str:
     return _classify_failure(outcome.errors) if outcome.errors else "digested"
 
 
+# ---------------------------------------------------------------------------
+# Sink helpers: DOI fallback, stub notes, archive
+# ---------------------------------------------------------------------------
+
+
+def crossref_doi_for_title(title: str) -> str:
+    """
+    Return the DOI of the Crossref record whose title matches exactly (after
+    normalization), else "". Trellis requires a locator on every reference,
+    so a DOI-less record that enrichment cannot resolve would be refused.
+    Exact-match only: a near-miss DOI would attach the wrong paper.
+    """
+    params = {"query.bibliographic": title, "rows": 5, "select": "DOI,title"}
+    if os.getenv("CROSSREF_EMAIL"):
+        params["mailto"] = os.environ["CROSSREF_EMAIL"]
+    try:
+        resp = http_get(
+            "https://api.crossref.org/works",
+            params=params,
+            limiter=CROSSREF_LIMITER,
+            timeout=30,
+        )
+        items = resp.json().get("message", {}).get("items", [])
+    except Exception as exc:  # network/JSON failure -> no fallback, not fatal
+        print(f"[warn] crossref lookup failed for {title[:60]!r}: {exc}")
+        return ""
+    want = _norm_title(title)
+    for item in items:
+        if _norm_title((item.get("title") or [""])[0]) == want:
+            return normalize_doi(item.get("DOI", ""))
+    return ""
+
+
+def _note_slug(text: str, words: int) -> str:
+    parts = re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
+    return "-".join(parts[:words]) or "untitled"
+
+
+def write_stub_note(record: RisRecord, notes_dir: Path, source: str) -> Optional[Path]:
+    """
+    Write a stub reference note for a newly created node. Never overwrites an
+    existing file: returns None so the caller leaves the node without a file.
+    """
+    first_author = record.authors[0].split(",")[0] if record.authors else "anon"
+    name = (
+        f"{_note_slug(first_author, 1)}-{record.year or 'nd'}-"
+        f"{_note_slug(record.title, 6)}.md"
+    )
+    path = notes_dir / name
+    if path.exists():
+        print(f"[warn] note exists, not overwritten: {path}")
+        return None
+    locator = (
+        f"doi:[{record.doi}](https://doi.org/{record.doi})"
+        if record.doi
+        else (record.url or "no identifier")
+    )
+    path.write_text(
+        f"# {record.title}\n\n"
+        f"**Category:** Reference (RIS import, unfiled)\n"
+        f"**Primary source:** {'; '.join(record.authors) or 'unknown'}. "
+        f'"{record.title}." *{record.venue or "unknown venue"}* '
+        f"({record.year or 'n.d.'}). {locator}\n"
+        f"**Accessed:** {date.today()} (RIS import from `{source}`)\n\n"
+        f"## Abstract\n\n{record.abstract or '_No abstract in the RIS record._'}\n\n"
+        f"## What it does\n\n_To be written._\n\n"
+        f"## What it does not establish\n\n_To be written._\n\n"
+        f"## Relevance\n\n_Unfiled._\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def archive_files(files: list[Path], archive_dir: Path) -> None:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = date.today().isoformat()
+    for path in files:
+        shutil.move(str(path), archive_dir / f"{stamp}-{path.name}")
+
+
 def main() -> int:
     # Enrichment (PubMed / S2 / Crossref) reads API keys from .env, matching
     # backfill.py; without this the pipeline runs key-less and gets rate-limited.
@@ -224,13 +310,60 @@ def main() -> int:
         action="store_true",
         help="Parse and report records without writing to Trellis",
     )
+    parser.add_argument(
+        "--parent",
+        help="Existing node slug to parent new references under "
+        f"(default: TRELLIS_PROJECT_SLUG or {trellis.PROJECT_SLUG})",
+    )
+    parser.add_argument(
+        "--archive",
+        type=Path,
+        help="Move the processed RIS files here when no record errored "
+        "(excluded from collection, so a sink folder can hold its own archive)",
+    )
+    parser.add_argument(
+        "--notes-dir",
+        type=Path,
+        help="Write a stub Markdown note per newly created reference here and "
+        "bind it as the node's file (must be inside the Trellis workspace)",
+    )
+    parser.add_argument(
+        "--no-crossref",
+        action="store_true",
+        help="Skip the Crossref exact-title DOI lookup for DOI-less records",
+    )
+    parser.add_argument(
+        "--ris-sink",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help="Also append every resolved paper to an RIS file "
+        "(no PATH: RIS_SINK_PATH or the default vault references/library.ris)",
+    )
     args = parser.parse_args()
 
-    print(f"workspace : {_workspace()}")
+    if args.parent:
+        os.environ["TRELLIS_PROJECT_SLUG"] = args.parent
+    workspace = Path(_workspace()).resolve()
+    notes_dir = args.notes_dir.resolve() if args.notes_dir else None
+    if notes_dir and workspace not in notes_dir.parents and notes_dir != workspace:
+        print(f"--notes-dir {notes_dir} is outside the workspace {workspace}")
+        return 2
+
+    print(f"workspace : {workspace}")
+    print(f"parent    : {trellis._project_slug()}")
     print(f"path      : {args.path}")
 
     root = Path(args.path)
     ris_files = collect_ris_files(root)
+    if args.archive:
+        archive = args.archive.resolve()
+        ris_files = [p for p in ris_files if archive not in p.resolve().parents]
+    # Never read (or archive) the sink's own output as input — whether the sink
+    # comes from --ris-sink or from RIS_SINK_PATH via the intake hook.
+    sink = RisSink(args.ris_sink or None) if args.ris_sink is not None else None
+    sink_path = (sink or RisSink()).path.resolve()
+    ris_files = [p for p in ris_files if p.resolve() != sink_path]
     if not ris_files:
         print(f"no RIS files found under {root}")
         return 1
@@ -276,14 +409,30 @@ def main() -> int:
         print("=== dry-run: nothing written ===")
         return 0
 
+    # Fail fast on a missing parent: add_reference would refuse every new node.
+    try:
+        trellis.get_node(trellis._project_slug())
+    except Exception as exc:
+        print(f"parent node {trellis._project_slug()!r} not found: {exc}")
+        return 2
+
+    if not args.no_crossref:
+        for record in records:
+            if not record.doi:  # the pipeline locates new nodes by DOI only
+                record.doi = crossref_doi_for_title(record.title)
+                if record.doi:
+                    print(f"crossref  : {record.title[:60]} -> {record.doi}")
+
     print()
     print(f"ingesting {len(records)} records through pipeline...")
     print()
 
     items = [record.to_input() for record in records]
-    outcomes, _metrics = ingest_batch(items, workers=args.workers)
+    if sink:
+        print(f"ris sink  : {sink.path}")
+    outcomes, _metrics = ingest_batch(items, workers=args.workers, ris_sink=sink)
 
-    created = updated = errored = linked = 0
+    created = updated = errored = linked = notes = 0
     for i, (record, outcome) in enumerate(zip(records, outcomes), 1):
         status = _outcome_status(outcome)
         edges = outcome.link.linked if outcome.link else 0
@@ -299,6 +448,14 @@ def main() -> int:
                 f"         -> created  slug={outcome.upsert.slug}  "
                 f"status={status}  edges={edges}"
             )
+            if notes_dir:
+                notes_dir.mkdir(parents=True, exist_ok=True)
+                note = write_stub_note(record, notes_dir, root.name)
+                if note:
+                    rel = note.relative_to(workspace).as_posix()
+                    trellis.update_node(outcome.upsert.slug, file_path=rel)
+                    notes += 1
+                    print(f"         -> note     {rel}")
         else:
             updated += 1
             slug = outcome.upsert.slug if outcome.upsert else "?"
@@ -308,8 +465,16 @@ def main() -> int:
     print()
     print(
         f"=== done: created={created} updated={updated} "
-        f"errors={errored} edges_linked={linked} ==="
+        f"errors={errored} edges_linked={linked} notes={notes} ==="
     )
+    if args.archive:
+        if errored:
+            print(
+                f"archive   : skipped ({errored} error(s)); files left in place to retry"
+            )
+        else:
+            archive_files(ris_files, args.archive)
+            print(f"archive   : moved {len(ris_files)} file(s) to {args.archive}")
     return 0
 
 
