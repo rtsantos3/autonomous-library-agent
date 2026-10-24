@@ -6,6 +6,17 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- 2026-10-24: RIS sink (`pipeline/ris_sink.py`). `RisSink(path).append(paper)`
+  writes one deduped RIS record (DOI, else normalized title). `ingest_batch`
+  takes `ris_sink=` and calls it for every resolved paper; with no argument the
+  hook runs only when `RIS_SINK_PATH` is set. Default path:
+  `~/git_repos/vault/references/library.ris`.
+- 2026-10-24: Configurable parent project. `TRELLIS_PROJECT_SLUG` overrides
+  `microbiome-research-library` so other workspaces can host new references.
+- 2026-10-24: RIS importer drop-folder options: `--parent`, `--archive`,
+  `--notes-dir` (stub notes bound as node files), `--ris-sink`, and an
+  exact-title Crossref DOI lookup for DOI-less records (`--no-crossref` skips
+  it). The sink's own output file is never read as input.
 - 2026-10-23: Add Europe PMC, OpenAlex, and OpenCitations indexed references to
   the citation union. Isolate all five retrieval APIs behind the same citation
   record contract. Preserve index-only IDs, partial results, and provenance.
