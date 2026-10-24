@@ -38,7 +38,8 @@ for how a paper flows through end to end.
 Given paper identifiers (DOIs, PMIDs, or an EndNote/RIS export), the pipeline:
 
 1. **Resolves** each paper's identity across Semantic Scholar, PubMed/NCBI, and
-   Crossref (Unpaywall for open-access links).
+   Crossref, falling back to DataCite and OpenAlex for DOIs Crossref lacks
+   (Unpaywall for open-access links).
 2. **Enriches** it with abstract, authors, venue, fields of study, MeSH terms, and
    publication types.
 3. **Upserts** a `reference` node into Trellis (deduplicated by s2_id → doi → pmid →
@@ -130,7 +131,7 @@ by hand-rolling `trellis add`/`link`.
            ▼
    phase 1 │ resolve_and_upsert (parallel, per item):
            │     parse_input .............. normalize str|dict
-           │     resolve_identity ......... enrich: PubMed → S2 → Crossref (fill missing)
+           │     resolve_identity ......... enrich: PubMed → S2 → Crossref → DataCite → OpenAlex (fill missing)
            │     find_existing_indexed .... dedup: s2_id ▸ doi ▸ pmid ▸ title
            │     upsert_node .............. create (index+lock) │ or merge into existing
            ▼

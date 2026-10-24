@@ -46,6 +46,7 @@ from pipeline._utils import (
 )
 from pipeline.citation_types import CitationResult
 from pipeline.citations import ambiguous_citation_keys, fetch_outbound_citations
+from pipeline.providers import datacite, openalex
 from pipeline.trellis import _doi_key, _norm_title
 
 if TYPE_CHECKING:
@@ -685,6 +686,38 @@ def _fill_from_crossref(fields: dict) -> str:
     return "crossref" if fields["source"] == "input-only" else fields["source"]
 
 
+# Title fallbacks after Crossref, tried in order until a title resolves. Each
+# provider exposes metadata(doi) -> dict | None with resolve_identity field
+# names, like citation providers expose retrieve(doi). DataCite registers the
+# DOIs Crossref lacks (arXiv, Zenodo, theses); OpenAlex indexes both registries.
+METADATA_FALLBACKS = (
+    ("datacite", datacite.metadata),
+    ("openalex", openalex.metadata),
+)
+
+
+def _fill_from_fallbacks(fields: dict) -> str:
+    doi = fields.get("doi")
+    if not doi:
+        return fields["source"]
+    for name, lookup in METADATA_FALLBACKS:
+        if _blank_to_none(fields.get("title")):
+            break
+        try:
+            found = lookup(doi)
+        except Exception as exc:  # one provider failing must not stop the chain
+            logger.warning("%s metadata doi=%r failed: %s", name, doi, exc)
+            continue
+        if not found:
+            continue
+        found = dict(found)
+        found.pop("doi", None)  # keep the requested DOI as the identity
+        fields.update(_merge_missing(fields, found))
+        if _blank_to_none(fields.get("title")) and fields["source"] == "input-only":
+            fields["source"] = name
+    return fields["source"]
+
+
 def resolve_identity(
     parsed: ParseResult, prefetched: "Optional[BatchResolved]" = None
 ) -> ResolveResult:
@@ -795,6 +828,8 @@ def resolve_identity(
         fields["source"] = _fill_from_s2(fields)
         if not parsed.doi or not _blank_to_none(fields.get("title")):
             fields["source"] = _fill_from_crossref(fields)
+        if not _blank_to_none(fields.get("title")):
+            fields["source"] = _fill_from_fallbacks(fields)
 
     # Fallback floor: if enrichment resolved no keywords, keep the source-side
     # keywords (e.g. RIS KW) so a record enrichment cannot find is not left with

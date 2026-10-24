@@ -6,6 +6,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- 2026-10-24: Title fallbacks after Crossref (`METADATA_FALLBACKS`): DataCite,
+  then OpenAlex, each exposing `metadata(doi)` like citation providers expose
+  `retrieve(doi)`. Fixes "Could not resolve a title" for DataCite-registered
+  DOIs (arXiv `10.48550/*`, Zenodo, theses) that PubMed, S2, and Crossref lack.
 - 2026-10-24: RIS sink (`pipeline/ris_sink.py`). `RisSink(path).append(paper)`
   writes one deduped RIS record (DOI, else normalized title). `ingest_batch`
   takes `ris_sink=` and calls it for every resolved paper; with no argument the
