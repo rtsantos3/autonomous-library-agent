@@ -300,7 +300,55 @@ def _make_tags(
     return list(dict.fromkeys(tags))
 
 
+_NAME_PARTICLES = {
+    "da",
+    "de",
+    "del",
+    "della",
+    "der",
+    "di",
+    "dos",
+    "du",
+    "la",
+    "le",
+    "st",
+    "st.",
+    "ten",
+    "ter",
+    "van",
+    "von",
+}
+_NAME_SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
+
+
+def _structured_author(name) -> Optional[dict]:
+    """
+    One author as Trellis reference-v1 wants it: {"family", "given"}.
+    Trellis silently drops plain-string authors, so every name is converted.
+    Accepts "Family, Given" or "Given [particles] Family [suffix]".
+    """
+    if isinstance(name, dict):
+        return name if name.get("family") or name.get("given") else None
+    text = " ".join(str(name or "").split())
+    if not text:
+        return None
+    if "," in text:
+        family, given = (part.strip() for part in text.split(",", 1))
+        return {"family": family, "given": given} if family else None
+    tokens = text.split(" ")
+    if len(tokens) == 1:
+        return {"family": tokens[0], "given": ""}
+    end = len(tokens)
+    if tokens[-1].lower() in _NAME_SUFFIXES and len(tokens) > 2:
+        end -= 1
+    start = end - 1
+    while start > 1 and tokens[start - 1].lower() in _NAME_PARTICLES:
+        start -= 1
+    return {"family": " ".join(tokens[start:]), "given": " ".join(tokens[:start])}
+
+
 def _reference_metadata(resolved: ResolveResult) -> dict:
+    authors = [_structured_author(name) for name in resolved.authors or []]
     return {
         "schema": "reference-v1",
         "doi": resolved.doi,
@@ -308,7 +356,7 @@ def _reference_metadata(resolved: ResolveResult) -> dict:
         "s2_id": resolved.s2_id,
         "year": resolved.year,
         "venue": resolved.venue,
-        "authors": resolved.authors,
+        "authors": [author for author in authors if author],
         "alt_dois": resolved.alt_dois,
     }
 

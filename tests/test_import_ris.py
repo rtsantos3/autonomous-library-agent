@@ -288,6 +288,9 @@ def test_project_slug_env_overrides_add_reference_parent(monkeypatch):
 def _main(monkeypatch, *argv):
     monkeypatch.setattr(sys, "argv", ["import_ris_network.py", *map(str, argv)])
     monkeypatch.setattr(import_ris_network, "load_dotenv", lambda: None)
+    # main() writes TRELLIS_PROJECT_SLUG for --parent; register it with
+    # monkeypatch first so teardown restores it and it cannot leak to later tests.
+    monkeypatch.setenv("TRELLIS_PROJECT_SLUG", trellis.PROJECT_SLUG)
     return import_ris_network.main()
 
 
