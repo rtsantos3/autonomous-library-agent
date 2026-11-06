@@ -3,9 +3,15 @@
 All notable changes to the autonomous-library-agent are recorded here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.1.0] - 2026-11-06
 
 ### Added
+- 2026-11-06: Add a self-hosted OMP/Claude Code marketplace catalog and release
+  installation instructions. Update the ingestion PRD with the local MCP
+  contract, verification evidence, and the boundary from the Eddy deployment.
+- 2026-11-06: Adopt PolyForm Noncommercial License 1.0.0 for this project and
+  declare its SPDX identifier in the plugin manifest. Dependency licenses remain
+  separate.
 - 2026-11-06: Local stdio MCP tools for OMP, Claude Code, and Codex. Each request
   names an existing Trellis workspace, explicit papers or RIS files, and an
   existing parent for ingestion. Preview is read-only. Input/source hashes and

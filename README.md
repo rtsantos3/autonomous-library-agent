@@ -1,419 +1,454 @@
-# autonomous-library-agent
+# Autonomous Library Agent
 
-**What this is:** a tool that turns your collection of papers into a searchable,
-connected knowledge base you can ask research questions against. Point it at a list
-of papers — DOIs, PMIDs, or an EndNote/RIS export — and it looks each one up, fills
-in the details (abstract, authors, journal, topics), removes duplicates, and links
-the papers together by their citations. The result is a map of the literature you've
-collected that you (or an AI assistant) can later query.
+A literature ingestion pipeline for the [Trellis stack](https://github.com/rtsantos3/Trellis).
+It resolves paper metadata, deduplicates records and references, and stores papers
+and citation links in a selected Trellis graph.
 
-Under the hood it is a literature **ingestion pipeline** plus a **persistent-agent
-contract** that maintain the library as a
-[Trellis](https://github.com/rtsantos3/Trellis) knowledge graph — every paper is a
-*node*, every citation is an *edge*. It is built to seed an offline **RAG** corpus
-(retrieval-augmented generation: an AI that answers from *your* papers rather than
-from guesswork). It is **library-agnostic** — it works for any collection, and a
-library is just a folder the tool is pointed at — resolves and enriches each paper
-across Semantic Scholar, PubMed, and Crossref, and is **idempotent**: safe for an
-autonomous agent to re-run unattended without ever creating duplicates.
+Inputs are DOI strings, PMID-bearing records, title-bearing records, or RIS files.
+The local MCP adapter exposes the same Python engine to OMP, Claude Code, and
+Codex. Direct Python and CLI entrypoints are also available.
 
-This repository is the **tooling**. The **data** (a materialized graph) lives in a
-separate library repository that includes this one as a submodule — see
-[`rtsantos3/LAD_library`](https://github.com/rtsantos3/LAD_library) for an example.
+Each local invocation specifies an existing Trellis directory and explicit paper
+inputs. Ingestion also requires an existing parent node. No library registration
+or workspace-wide intake scan is required.
 
-**New here?** First install the Trellis CLI — it ships as an npm package and that
-is the main download route:
+## Pipeline
 
-```bash
-npm install -g @rtsantos3/trellis-app     # provides the `trellis` command on PATH
-```
+1. Resolve bibliographic identity through PubMed, Semantic Scholar, Crossref,
+   DataCite, and OpenAlex as available.
+2. Enrich authors, abstracts, publication details, and topical metadata.
+3. Collect and deduplicate indexed references from Semantic Scholar, Crossref,
+   Europe PMC, OpenAlex, and OpenCitations.
+4. Create or update reference nodes and link cited papers already in the graph.
+5. Return input hashes, engine identity, and per-record results.
 
-Then run `./setup.sh` (see [Setup](#setup)) to get a working environment and
-hydrate a graph, read [`AGENT-CONTRACT.md`](AGENT-CONTRACT.md) for the agent-facing
-runtime contract, and see the [Ingestion pipeline](#ingestion-pipeline) map below
-for how a paper flows through end to end.
+## Trellis dependency
 
-## What it does
+Trellis is the separate graph application and storage layer. All graph mutations
+go through its CLI.
 
-Given paper identifiers (DOIs, PMIDs, or an EndNote/RIS export), the pipeline:
+Install Trellis from its npm package:
 
-1. **Resolves** each paper's identity across Semantic Scholar, PubMed/NCBI, and
-   Crossref, falling back to DataCite and OpenAlex for DOIs Crossref lacks
-   (Unpaywall for open-access links).
-2. **Enriches** it with abstract, authors, venue, fields of study, MeSH terms, and
-   publication types.
-3. **Upserts** a `reference` node into Trellis (deduplicated by s2_id → doi → pmid →
-   title), tagged with a flat topical vocabulary.
-4. **Links** citation edges to other papers already in the graph.
+**[@rtsantos3/trellis-app](https://www.npmjs.com/package/@rtsantos3/trellis-app)**
 
-The graph is built to **seed an offline RAG corpus**, so records are denormalized and
-export-complete rather than optimized for live traversal.
-
-## Architecture
-
-```
-pipeline/
-  aggregator.py   batch DOI resolution (one S2 batch call for many papers)
-  citations.py    fetch a paper's outbound citations (references)
-  ingestion.py    the core: parse → resolve → dedup → upsert → link; ingest_batch()
-  trellis.py      thin wrapper over the `trellis` CLI; workspace resolution; indexes
-  _utils.py       slug / tag normalization (pub_type_slug, canonical_type_tag)
-  _http.py        HTTP with retry/backoff
-scripts/
-  backfill.py     resumable batch orchestrator over a DOI list
-  import_ris_network.py  RIS importer; parses records and feeds ingest_batch()
-  export_graph.sh slim JSONL snapshot of the graph (mutation_log stripped)
-  monitor.py      live pipeline-status dashboard
-  migrations/     one-time data-repair migrations (dry-run by default)
-  benchmarks/     interconnected-batch timing harnesses (dev-only)
-```
-
-The pipeline **shells out to the `trellis` CLI** for all graph writes; Trellis (a
-local SQLite-backed knowledge graph) is an external dependency, not vendored here.
-
-### Trellis dependency
-
-Trellis is distributed as the npm package
-[`@rtsantos3/trellis-app`](https://www.npmjs.com/package/@rtsantos3/trellis-app)
-(source: [`github.com/rtsantos3/Trellis`](https://github.com/rtsantos3/Trellis)).
-It bundles a Python (Click) CLI behind a Node launcher, so the `trellis` command
-must be on your `PATH` before this pipeline can write to a graph:
+The local integration was exercised with this version:
 
 ```bash
-npm install -g @rtsantos3/trellis-app
-trellis --version        # sanity check
+npm install -g @rtsantos3/trellis-app@0.17.0-beta.1
+trellis --help
 ```
 
-`setup.sh` verifies the `trellis` CLI is present but does not install it — install
-the npm package first. The pipeline is pinned to the CLI surface of Trellis
-`0.16.x`.
+That is a **prerelease**, not a stable-version recommendation. Review the
+[Trellis documentation and releases](https://github.com/rtsantos3/Trellis)
+before changing versions. Pin your chosen version for repeatable runs.
 
-### Workspace resolution
+The npm package provides the required `trellis` command. Trellis is not bundled
+in this repository.
 
-The library a run targets is resolved with this precedence:
+## Requirements
 
-```
-TRELLIS_WORKSPACE (env or .env)  >  config.yml `workspace:`  >  parent of this repo
-```
+You need:
 
-New references are parented under `microbiome-research-library`, or under the
-existing node named by `TRELLIS_PROJECT_SLUG` (the RIS importer's `--parent`).
+- Python 3.10 or later.
+- Node.js 18 or later and npm for Trellis.
+- The `trellis` executable on `PATH`.
+- An initialized Trellis directory and an existing parent node for references.
+- Network access to bibliographic providers for ingestion.
 
-`pipeline.trellis`, `setup.sh`, and `export_graph.sh` follow this (`setup.sh` also
-reads `TRELLIS_WORKSPACE` from `.env`). `scripts/monitor.py` currently honours only
-the `TRELLIS_WORKSPACE` env var, not `config.yml`.
+The local adapter is tested on Linux and uses POSIX process-group cancellation.
+Windows users should use a compatible environment such as WSL.
 
-Secrets (API keys) live only in `.env` (gitignored). Non-secret tuneables live in
-`config.yml` (gitignored). Tracked fill-in-the-blank templates for both live in
-`templates/` (`templates/.env.example`, `templates/config.yml.example`); `setup.sh`
-copies them into place.
+## Installation
 
-## Ingestion pipeline
-
-There is **one** ingestion pipeline: `pipeline.ingestion.ingest_batch`. RIS
-import, backfill, and single-paper requests all feed it — nothing creates nodes
-by hand-rolling `trellis add`/`link`.
-
-```
- ENTRYPOINTS (every path that ingests a paper)
- ─────────────────────────────────────────────
-  scripts/import_ris_network.py   parse RIS ─┐
-  scripts/backfill.py → backfill_nodes ──────┤  (bare DOI str ── or ── full record dict)
-  pipeline/ingestion.py  --doi/--pmid/--title┤
-  scripts/benchmarks/* ──────────────────────┤
-                                             ▼
-             ╔═══════════════════════════════════════════════╗
-             ║        ingest_batch(list[str | dict])         ║   ◄── THE ONE PIPELINE
-             ╚═══════════════════════════════════════════════╝
-                                             │
-   phase 0 │ batch_resolve ................. one S2 batch call for every DOI in the set
-           │ build_node_index ............. snapshot the graph into an in-memory index
-           ▼
-   phase 1 │ resolve_and_upsert (parallel, per item):
-           │     parse_input .............. normalize str|dict
-           │     resolve_identity ......... enrich: PubMed → S2 → Crossref → DataCite → OpenAlex (fill missing)
-           │     find_existing_indexed .... dedup: s2_id ▸ doi ▸ pmid ▸ title
-           │     upsert_node .............. create (index+lock) │ or merge into existing
-           ▼
-   phase 1½│ reverse_materialize .......... link papers already in graph that cite this one
-           │ build_edge_index ............. snapshot edges (dedupe guard)
-           ▼
-   phase 2 │ fetch_and_store → store_citations .. union S2 + Crossref references, preserve sources
-           ▼
-   phase 3 │ link_stored → link_citations ...... edges to targets already present
-           ▼
-   phase 4 │ verify_upserted .............. confirm Trellis state
-           ▼
-   phase 5 │ set_final_pipeline_status .... queued/digesting ─▸ digested
-                                                         └────▸ needs-review │ failed
-                                             │
-                                             ▼
-                 pipeline/trellis.py — the ONE write layer (add / update / link /
-                 annotate). Every graph write goes through here.
-```
-
-A single paper is just a one-item batch: `ingest_batch([record])[0]`. Nothing
-creates, enriches, or links a node outside this box; the only other graph
-writers are the one-time `scripts/migrations/` tag-repair scripts.
-
-**Input** is `list[str | dict]`: a string is a bare DOI; a dict is a full record
-(`title`, optional `doi`/`pmid`/`abstract`/`authors`/`year`/`venue`). Both
-normalize through `parse_input`, so a DOI-less record (e.g. a title-only RIS
-entry) takes the same path — it just skips the DOI batch prefetch and is enriched
-per-paper. A dict needs at least a DOI, a PMID, or a ≥ 10-char title.
-
-The phase-by-phase flow is the diagram above. Two behaviours the diagram only
-hints at:
-
-Enrichment guards: a PMID found by *search* is accepted only if its title fuzzy-
-matches the known title (≥ 85), rejecting PubMed false matches on unindexed DOIs.
-
-**Idempotency** (the agent re-runs unsupervised, so re-ingest must be a no-op):
-dedup converges re-ingests onto one node; identity/status tags are re-derived
-each pass; topical tags (`mesh:`/`kw:`/`field:`/`type:`) are re-derived only when
-the resolved record carries topical data and otherwise **preserved**, so a sparse
-re-ingest never wipes a previously enriched node; and `store_citations` never
-overwrites a non-empty citation set with an empty one. Empty or unavailable
-bibliographies finish as `pipeline:needs-review`, not `pipeline:digested`.
-The pipeline never emits `pipeline:scaffolded` (a legacy stub state from the
-retired single-paper scaffolder).
-
-**Citation collection:** Semantic Scholar, Crossref, Europe PMC, OpenAlex, and
-OpenCitations all contribute indexed outbound references. Retrieval is a union,
-not a fallback chain. Non-empty S2 batch references are reused. S2 and Europe PMC
-retrieval follows pagination; OpenAlex hydrates indexed targets in bounded batches.
-S2 batch parsing retains PMID-only and S2-ID-only references. Europe PMC skips
-exact-DOI search hits that explicitly report no references.
-No provider adapter retrieves full text.
-
-Each module in `pipeline/providers/` exposes `retrieve(doi) -> CitationResult`.
-Shared records live in `pipeline/citation_types.py`; `pipeline/citations.py` owns
-collection and deduplication. Provider changes do not change the intake entrypoint
-or the `outbound_citations` envelope. Items retain DOI, PMID, S2 ID, title, year,
-and `sources`, with optional `openalex_id` and `omid` for index-only references.
-
-The union deduplicates normalized DOIs, PMIDs, S2 IDs, OpenAlex IDs, and OMIDs.
-Exact, unambiguous title matches can enrich identifier-poor references. Distinct
-DOIs stay separate, even when a preprint and journal article share a PMID.
-Conflicting secondary identifiers do not prevent an exact DOI merge.
-Ambiguity is resolved across the full input, including identifier-only bridges.
-Generic titles do not override stable identifiers. Citation linking prefers the
-cited DOI and rejects conflicting known DOIs. Ambiguous secondary identifiers
-cannot select a target; non-DOI URLs are not treated as DOI conflicts.
-`outbound_citations.providers` records provider outcomes and publisher notices.
-A failed provider does not discard other providers' references. Partial OpenAlex
-hydration retains the known target IDs. `outbound_citations.status` is `available`
-or `incomplete`; available does not assert an exhaustive bibliography.
-Only a non-empty **stored citation list** permits `pipeline:digested`. Provider
-status labels alone are insufficient. Zero links to existing library papers are
-allowed; an empty stored bibliography finishes as `pipeline:needs-review`.
-
-The [provider PRD](docs/citation_provider_prd.md) defines the output contract,
-identity rules, and acceptance criteria.
-
-To repair an existing paper without replaying Slack uploads, run the same pipeline
-against its DOI in the intended workspace:
-
-```python
-from pipeline.ingestion import ingest_batch
-
-outcomes, metrics = ingest_batch(["10.1038/s41575-025-01077-5"])
-print(outcomes[0].errors)
-```
-
-The pipeline updates the existing node and links only targets already in the
-library. It does not create nodes for every cited reference.
-
-See `AGENT-CONTRACT.md` → *Ingestion Pipeline* for the agent-facing contract.
-
-## Setup
+### 1. Source checkout
 
 ```bash
-./setup.sh
+git clone https://github.com/rtsantos3/autonomous-library-agent.git
+cd autonomous-library-agent
+export LIBRARY_AGENT_ROOT="$PWD"
 ```
 
-`setup.sh` is idempotent and safe to re-run. It creates a named conda env
-`autonomous-library-agent` (from `environment.yml`; never recreated if it already
-exists), creates `.env` and `config.yml` (prompting once for the workspace,
-defaulting to the parent directory), verifies the `trellis` CLI and `git-lfs`, hydrates
-the graph from a committed export if one exists, and runs the offline test suite.
-
-Then edit `.env` with your keys (`NCBI_API_KEY`, `S2_API_KEY`, `CROSSREF_EMAIL`,
-`UNPAYWALL_EMAIL`) and activate the env (`conda activate autonomous-library-agent`).
-`OPENALEX_API_KEY` and `OPENCITATIONS_ACCESS_TOKEN` are optional retrieval
-credentials. Europe PMC needs no key. Unauthenticated service limits still apply.
-
-## Usage
+For a release-pinned checkout:
 
 ```bash
-# ingest a batch of DOIs end-to-end (resolve + enrich + link)
-python -c "from pipeline.ingestion import ingest_batch; \
-dois=[l.strip() for l in open('samples/seed_dois.txt') if l.strip() and not l.startswith('#')]; \
-o,m=ingest_batch(dois); print(len(o),'ingested')"
-
-# import an RIS file/dir end-to-end (parse → ingest_batch: enrich + dedup + link)
-python scripts/import_ris_network.py path/to/library.ris
-
-# RIS drop folder in another workspace (e.g. a personal vault): parent new
-# references under an existing node, write stub notes, archive processed files,
-# resolve DOI-less records by exact Crossref title, and sink results to RIS
-TRELLIS_WORKSPACE=~/git_repos/vault python scripts/import_ris_network.py \
-  ~/git_repos/vault/references --parent references \
-  --notes-dir ~/git_repos/vault/references \
-  --archive ~/git_repos/vault/references/imported --ris-sink
-
-# RIS sink: append every resolved paper to an RIS file (deduped by DOI/title).
-# Intake hook: ingest_batch(items, ris_sink=RisSink(path)), or set RIS_SINK_PATH.
-# Callable:    from pipeline.ris_sink import RisSink; RisSink(path).append(paper)
-# Default path: ~/git_repos/vault/references/library.ris
-
-# resumable backfill: (re)process nodes already in the graph, selected by status
-python scripts/backfill.py --statuses queued,scaffolded,failed
-
-# snapshot the graph to the shareable JSONL export
-./scripts/export_graph.sh
-
-# watch pipeline status (set TRELLIS_WORKSPACE if config.yml is not the default)
-TRELLIS_WORKSPACE=<library-dir> python scripts/monitor.py
+git checkout v0.1.0
 ```
 
-## Local agent plugin: OMP, Claude Code, and Codex
+Keep the checkout at a specific reviewed commit or release tag for repeatable
+runs. Use the marketplace installation below if you prefer client-managed
+plugin files.
 
-The local stdio MCP adapter exposes the same Python ingestion engine to all three
-clients. It does not use the Slack library registry or require a registered
-library. Each call supplies its own existing Trellis directory. The existing
-Hermes integration in `LAD-LAB/KB-agent` remains separate and unchanged.
+### 2. Python environment
 
-| Tool | Behavior |
-|---|---|
-| `library_preview` | Validate explicit records or exact RIS files and inspect existing identity matches. No provider requests or graph writes. |
-| `library_ingest` | Resolve, enrich, deduplicate, and link only the selected papers through `ingest_batch`. Requires an existing parent node. |
-
-Both tools accept an absolute `workspace` path and either `records` (DOI strings
-or pipeline record objects), `ris_paths` (absolute paths to individual RIS files),
-or both. They never scan RIS directories or select unrelated queued papers.
-Pass the existing parent slug or UUID as `parent`; it is required for ingestion
-because Trellis reference nodes require a parent. No project or library is
-automatically created. For example, use these same arguments for preview and
-the explicitly requested ingestion:
-
-```json
-{
-  "workspace": "/absolute/path/to/any-trellis-directory",
-  "parent": "existing-parent-slug-or-uuid",
-  "records": ["10.1038/s41575-025-01077-5"]
-}
-```
-
-Ingestion writes bibliographic metadata and citation links, not PDF extraction or
-LLM findings. It does not archive inputs, use an inherited `RIS_SINK_PATH`, publish
-Git changes, or send Slack messages. Existing papers can be updated, and citation
-links can be materialized to existing targets. Cancellation may leave partial
-writes; inspect node status before retrying. Tool annotations describe read/write
-behavior but do not replace the client's permission policy.
-
-### Runtime setup
-
-Use the pipeline's existing Python environment and a `trellis` executable on
-`PATH`. Separately, the Python used to start the MCP server needs the optional
-SDK pinned in `requirements-mcp.txt`. They can be the same Python if both sets of
-dependencies are present. Nothing is installed by the adapter itself.
+For a **new** Conda environment:
 
 ```bash
-# Run with the Python that will host the MCP adapter.
-python -m pip install -r /absolute/path/to/checkout/requirements-mcp.txt
+conda env create -f environment.yml
+```
 
-# The child engine uses this Python; provider credentials come from its inherited
-# host environment, never tool arguments or a target directory's .env file.
+If the environment already exists, do not recreate it. Activate it, then install
+the optional MCP adapter dependency:
+
+```bash
+conda activate autonomous-library-agent
+python -m pip install -r requirements-mcp.txt
+```
+
+Using one Python environment for the server and engine is the simplest setup.
+If you prefer separate environments, tell the server which Python runs the engine:
+
+```bash
 export LIBRARY_AGENT_PYTHON=/absolute/path/to/engine-python
 ```
 
-The plugin manifest starts `python`, so launch OMP or Claude Code with that MCP
-Python on `PATH`. Keep the source checkout at a reviewed commit for a pinned
-engine. No edit to this repository's `config.yml` is needed for target selection.
+Otherwise it uses its own Python interpreter. The plugin manifest starts
+`python`, so the Python with the MCP SDK must be on `PATH` when you launch your
+agent. The adapter itself does not install or download dependencies.
 
-### OMP and Claude Code
+### 3. Trellis workspace
 
-Both clients can load the repository's `.claude-plugin/plugin.json` in place:
+Use an existing initialized Trellis directory and an existing parent node for
+references. No library registry is required.
+
+To create a new graph explicitly:
 
 ```bash
-omp --plugin-dir /absolute/path/to/checkout
-claude --plugin-dir /absolute/path/to/checkout
+mkdir -p "$HOME/trellis-papers"
+cd "$HOME/trellis-papers"
+trellis init
+trellis add project papers
 ```
 
-The manifest declares a 30-minute tool timeout. If the host has a shorter
-process-wide MCP timeout configured, adjust it explicitly for long ingestion
-runs. Loading the plugin does not grant permission to write every local graph.
+From the selected Trellis directory, verify the parent:
 
-### Codex
+```bash
+trellis get papers --json
+```
 
-Configure the same server in `~/.codex/config.toml` or the trusted project's
-`.codex/config.toml`. Use the absolute MCP-Python and source paths:
+The result includes the node's `id`. Use that UUID as `parent` in tool requests
+when the slug is ambiguous.
+
+The local tools never initialize a graph or invent a parent node for you.
+
+### 4. Agent clients
+
+All three local clients use the same stdio MCP server. These are agent-callable
+tools, not separate implementations of the ingestion pipeline.
+
+#### OMP
+
+```bash
+omp --plugin-dir "$LIBRARY_AGENT_ROOT"
+```
+
+#### Claude Code
+
+```bash
+claude --plugin-dir "$LIBRARY_AGENT_ROOT"
+```
+
+To check the package and connection:
+
+```bash
+claude plugin validate "$LIBRARY_AGENT_ROOT"
+claude --plugin-dir "$LIBRARY_AGENT_ROOT" mcp list
+```
+
+The shared plugin manifest declares a 30-minute tool timeout. A shorter
+process-wide MCP deadline in the host can still take precedence; adjust that
+explicitly for longer runs.
+
+#### Codex
+
+Add the same server to `~/.codex/config.toml`, or to a trusted project's
+`.codex/config.toml`. Replace the absolute paths with your Python executable and
+source checkout:
 
 ```toml
 [mcp_servers.library]
 command = "/absolute/path/to/mcp-python"
-args = ["/absolute/path/to/checkout/scripts/agent_mcp.py"]
+args = ["/absolute/path/to/autonomous-library-agent/scripts/agent_mcp.py"]
 tool_timeout_sec = 1800
 
 [mcp_servers.library.env]
 LIBRARY_AGENT_PYTHON = "/absolute/path/to/engine-python"
 ```
 
-Codex versions that name this timeout `tool_call_timeout_sec` instead of
-`tool_timeout_sec` must use their supported spelling. Check the resolved server
-configuration with `codex mcp get library --json`; an unrecognized setting may be
-ignored. Configure provider credentials through the host's environment settings.
+The environment table is only needed when the server and engine use different
+Python interpreters. To find the executable in an activated environment, run
+`python -c "import sys; print(sys.executable)"`.
 
-### Repeatability and receipts
+Inspect the resolved Codex configuration:
 
-Every successful call returns the canonical target, explicit records, RIS paths
-and byte hashes, an input hash, the engine Git revision and Python-source hash,
-and Python dependency versions. Ingestion also reports each node's committed
-pipeline status, citation sources, and stored-citation hash. `links_processed`
-includes already-existing links; it is not a count of newly created edges.
-
-Identical preview and ingestion arguments have the same input hash. Separate
-worker processes prevent simultaneous requests from switching each other's
-target environment. Repeated ingestion deduplicates nodes and reference edges.
-Live provider responses and the graph can change; receipts identify a run but
-do not provide byte-identical offline replay or archive provider responses.
-
-## Persistent-agent model
-
-`AGENT-CONTRACT.md` is the runtime contract for an autonomous agent that operates this
-pipeline in a loop. It keeps **no memory across sessions** — all state lives in the
-Trellis graph and is driven by `pipeline:*` status tags. The canonical pipeline
-drives a node:
-
-```
-queued → digesting → digested
-                   ↘ needs-review / failed
+```bash
+codex mcp get library --json
 ```
 
-(`scaffolded` is a legacy stub state; `ingest_batch` does not emit it.)
+Some Codex versions use `tool_call_timeout_sec` instead of `tool_timeout_sec`.
+Use the spelling supported by your version and confirm that the resolved timeout
+is not null.
 
-Because the agent re-runs unsupervised, **every operation is idempotent**: identity
-tags are re-derived from the resolved record each pass (never accumulated) while
-topical tags and stored citations are preserved when a re-ingest resolves none
-(no downgrade); citation linking is guarded against duplicate edges by a read-only
-edge check (a pipeline-side workaround for the lack of an edge-uniqueness constraint
-in Trellis); and an in-flight `pipeline:digesting` marker lets the agent reset stale
-in-flight nodes to `failed` on its next startup (per `AGENT-CONTRACT.md`).
-Re-ingesting deduplicates nodes and never creates duplicate citation edges, though
-it may refresh a node's metadata, status, and annotations.
+#### Hermes
 
-## Migrations
+The Hermes integration lives in
+[LAD-LAB/KB-agent](https://github.com/LAD-LAB/KB-agent), under
+`workflows/ladlab.literature`.
 
-`scripts/migrations/` holds one-time data-repair scripts (e.g. identity-tag
-decontamination, cross-wired-identity repair). All default to a dry run; pass
-`--apply` to mutate, and all writes route through the Trellis CLI.
+It has its own setup, authenticated transport context, publication, and feedback
+behavior. This local plugin does not recreate or bypass those shared-lab controls.
+
+## Targeted ingestion
+
+The MCP server exposes two tools. Clients may add their own prefixes to the names.
+
+| Tool | What it does |
+|---|---|
+| `library_preview` | Validates exact inputs and inspects existing identity matches. No provider requests or graph writes. |
+| `library_ingest` | Resolves, enriches, deduplicates, and links only the selected papers. Writes to the specified graph. |
+
+Use the **same arguments** for preview and the explicitly requested ingestion.
+Replace the example directory and parent with values from your graph:
+
+```json
+{
+  "workspace": "/absolute/path/to/your-trellis-directory",
+  "parent": "papers",
+  "records": ["10.1038/s41575-025-01077-5"]
+}
+```
+
+- `workspace`: an absolute path to an existing initialized Trellis directory.
+- `parent`: an existing node slug or UUID; required for ingestion. Prefer a UUID
+  when a slug is ambiguous.
+- `records`: explicit DOI strings or pipeline record objects containing DOI,
+  PMID, or a title of at least 10 characters.
+- `ris_paths`: absolute paths to individual RIS files, instead of or alongside
+  `records`. Directories are not accepted.
+
+For PMID input, use a record object instead of a bare string:
+
+```json
+{
+  "workspace": "/absolute/path/to/your-trellis-directory",
+  "parent": "papers",
+  "records": [{"pmid": "22699609"}]
+}
+```
+
+For example, ask your agent:
+
+> Preview this paper in my specified Trellis directory under `papers`. Do not
+> ingest it yet. Show me the target and input receipt.
+
+Then, after checking the target:
+
+> Ingest exactly those inputs into the same directory and parent. Report the
+> committed node status and any errors.
+
+Preview uses supplied identifiers and titles. Provider resolution during ingestion
+can discover a different canonical identity, so preview is not a guaranteed final
+match. Ingestion may also materialize citation relationships with existing papers.
+
+## Scope and citation completeness
+
+The local tools do **not** extract PDF text, generate scientific findings, scan
+for more papers, process unrelated queued records, archive uploads, publish Git
+changes, or send Slack messages. They also disable an inherited `RIS_SINK_PATH`
+so a local request does not append to some other vault's bibliography.
+
+In this pipeline, `digested` means bibliographic ingestion and citation processing
+succeeded. It does **not** mean full-text extraction or scientific review is done.
+
+An empty **stored** bibliography finishes as `pipeline:needs-review`, not
+`pipeline:digested`. Zero citation links can still be valid if none of the cited
+papers is already in your graph. A non-empty bibliography does not prove that
+every published reference was recovered.
+
+Reference collection is a **union, not a fallback chain**. Each item retains its
+sources. Provider outcomes include `available`, `empty`, `unavailable`,
+`withheld`, `partial`, and `failed`. A `withheld` notice indicates that the
+publisher did not make references available. A failed provider does not discard
+usable references from another provider, and an empty fetch does not erase a
+previously stored non-empty bibliography.
+
+The pipeline does not create a paper node for every cited reference. Expanding a
+bibliography into hundreds of new papers is a different decision, not a side
+effect of this tool.
+
+## Reproducibility
+
+Every successful local invocation returns a receipt with:
+
+- The canonical target directory, selected parent, and explicit records.
+- RIS paths and SHA-256 hashes of the input bytes.
+- A hash of the complete input selection.
+- The Python-source hash and the engine Git revision when Git metadata is available.
+- Python interpreter and dependency versions.
+
+Ingestion also reports node identities, committed pipeline status, provider
+outcomes, and a hash of the stored citation records. `links_processed` includes
+already-existing links; it is not a count of newly created edges.
+
+Identical preview and ingestion arguments produce the same input hash. Each
+request runs in a separate worker process and overrides inherited workspace
+settings, so one request cannot switch another request's target environment.
+Repeated ingestion reuses matched nodes and guards existing reference edges;
+metadata, status, and annotations can still be refreshed.
+
+Live providers and graph contents change. Receipts identify a run; they do not
+archive provider responses or provide byte-identical offline replay. Pin the
+source revision and runtime versions when comparing runs.
+
+## Credentials and permissions
+
+Provider credentials come from the host environment, not tool arguments. The MCP
+adapter does not load a target directory's `.env` file. Optional settings are
+listed in [`templates/.env.example`](templates/.env.example). Public API access
+is subject to provider availability and rate limits.
+
+The server runs with the local user's permissions. The workspace argument routes
+the operation; it is **not a filesystem sandbox**. Enable the plugin only in
+trusted clients and retain their write-approval policy.
+
+Cancellation can leave partial graph writes. Inspect the affected node status
+before retrying.
+
+## Python and CLI usage
+
+The canonical entrypoint is `pipeline.ingestion.ingest_batch`. Direct Python and
+legacy CLI use environment/config bindings instead of per-call MCP arguments:
+
+```bash
+cd "$LIBRARY_AGENT_ROOT"
+export TRELLIS_WORKSPACE=/absolute/path/to/your-trellis-directory
+export TRELLIS_PROJECT_SLUG=papers
+```
+
+```python
+from pipeline.ingestion import ingest_batch
+
+outcomes, metrics = ingest_batch([
+    "10.1038/s41575-025-01077-5"
+])
+
+for outcome in outcomes:
+    print(outcome.upsert, outcome.errors)
+```
+
+Direct engine workspace resolution is `TRELLIS_WORKSPACE`, then `config.yml`
+`workspace:`, then the parent of the source checkout. The MCP adapter overrides
+that implicit selection with the explicit request target. Direct callers default
+to parent `microbiome-research-library` unless `TRELLIS_PROJECT_SLUG` is set.
+
+The legacy scripts provide broader operations. Check their `--help` output before
+using directory import or backfill:
+
+```bash
+python scripts/import_ris_network.py /absolute/path/to/papers.ris
+python scripts/backfill.py --help
+./scripts/export_graph.sh
+```
+
+The RIS importer also supports explicit parent selection, archival, stub notes,
+and a deduplicated RIS sink. Those are CLI options, not hidden MCP side effects.
+The sink API is `pipeline.ris_sink.RisSink(path).append(paper)`; ingestion also
+accepts `ris_sink=`. Monitor target selection uses `TRELLIS_WORKSPACE` rather than
+`config.yml`.
+
+For the older managed-library setup, `./setup.sh` prepares the named Conda
+environment and local configuration, verifies prerequisites, can hydrate a graph
+from an existing export, and runs offline checks. It is not required to register
+a target for the local MCP tools.
+
+## Architecture
+
+- [`scripts/agent_mcp.py`](scripts/agent_mcp.py): shared local MCP server.
+- [`pipeline/local_agent.py`](pipeline/local_agent.py): one explicit request per
+  worker process, with receipts and selected-target binding.
+- [`pipeline/ingestion.py`](pipeline/ingestion.py): parse, resolve, deduplicate,
+  store, link, verify, and assign status.
+- [`pipeline/citations.py`](pipeline/citations.py) and
+  [`pipeline/providers/`](pipeline/providers/): indexed reference collection and
+  union/deduplication.
+- [`pipeline/trellis.py`](pipeline/trellis.py): the graph-write boundary.
+- [`scripts/migrations/`](scripts/migrations/): explicit data-repair utilities;
+  inspect each script's options before applying a migration.
+
+The same ingestion engine serves local tools, RIS import, and backfill. It
+reuses non-empty S2 batch references, paginates S2 and Europe PMC retrieval, and
+hydrates OpenAlex targets in bounded batches. DOI conflicts remain distinct;
+ambiguous secondary identifiers cannot select a citation target.
+
+See [`AGENT-CONTRACT.md`](AGENT-CONTRACT.md) for the runtime contract and
+[`docs/citation_provider_prd.md`](docs/citation_provider_prd.md) for provider
+identity rules and acceptance criteria. Full-text extraction is a separate stage
+from this bibliographic pipeline.
+
+## Distribution
+
+The repository includes a self-hosted catalog at
+[`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json).
+The same catalog supports OMP and Claude Code.
+
+After completing the Python/MCP and Trellis setup above, install with OMP:
+
+```bash
+omp plugin marketplace add rtsantos3/autonomous-library-agent
+omp plugin install autonomous-library-agent@autonomous-library-agent
+```
+
+Or install with Claude Code:
+
+```bash
+claude plugin marketplace add rtsantos3/autonomous-library-agent
+claude plugin install autonomous-library-agent@autonomous-library-agent
+```
+
+Restart the client after installation. Start it with the Python environment
+containing the MCP SDK active, and keep `trellis` on `PATH`. These installs
+fetch plugin files; they do not install Python dependencies or Trellis.
+
+Marketplace installation and `--plugin-dir` are alternative ways to load the
+plugin. Do not load both copies in the same session. Codex uses the direct MCP
+configuration above rather than this catalog.
+
+The [GitHub releases](https://github.com/rtsantos3/autonomous-library-agent/releases)
+identify published versions. The marketplace follows the repository's default
+branch; use a release-pinned source checkout when you need a fixed revision.
+This plugin has no separate npm package. Trellis has its own npm distribution.
+
+This is a self-hosted marketplace, not a listing in an Anthropic- or
+OMP-curated directory. Those directories have separate submission processes.
+
+References: [Claude Code marketplace documentation](https://code.claude.com/docs/en/plugins/marketplace-reference)
+and the [OMP project](https://github.com/can1357/oh-my-pi).
 
 ## Testing
 
+Run the offline suite in the ingestion environment:
+
 ```bash
-python -m pytest tests/ -q
+python -m pytest tests/ -q -m "not integration"
 ```
 
-The suite is offline (no network); ingestion paths are exercised with mocked HTTP and
-a temporary Trellis workspace.
+Exercise the local target-boundary checks with real isolated Trellis workspaces:
+
+```bash
+python -m pytest tests/test_local_agent.py -q -m integration
+```
+
+Other integration tests can require network access. Do not point tests at a
+personal or shared library unless you explicitly intend to modify it.
+
+## License
+
+This project is source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE)
+(`PolyForm-Noncommercial-1.0.0`). It is not an unrestricted MIT or OSI-approved
+open-source release.
+
+The license permits noncommercial purposes and the research, personal, and
+organizational uses specified in its terms. Commercial uses outside those grants
+require separate permission from the applicable copyright holders.
+
+Trellis and other dependencies retain their own licenses.

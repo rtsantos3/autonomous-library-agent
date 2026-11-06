@@ -1,6 +1,7 @@
 {
   "name": "autonomous-library-agent",
   "version": "0.1.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Targeted bibliographic ingestion into any explicitly selected local Trellis directory.",
   "author": {
     "name": "Autonomous Library Agent contributors"
