@@ -1,0 +1,2 @@
+# Optional host adapter. The ingestion environment remains unchanged.
+mcp==1.26.0

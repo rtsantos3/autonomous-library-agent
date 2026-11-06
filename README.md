@@ -277,6 +277,108 @@ python scripts/backfill.py --statuses queued,scaffolded,failed
 TRELLIS_WORKSPACE=<library-dir> python scripts/monitor.py
 ```
 
+## Local agent plugin: OMP, Claude Code, and Codex
+
+The local stdio MCP adapter exposes the same Python ingestion engine to all three
+clients. It does not use the Slack library registry or require a registered
+library. Each call supplies its own existing Trellis directory. The existing
+Hermes integration in `LAD-LAB/KB-agent` remains separate and unchanged.
+
+| Tool | Behavior |
+|---|---|
+| `library_preview` | Validate explicit records or exact RIS files and inspect existing identity matches. No provider requests or graph writes. |
+| `library_ingest` | Resolve, enrich, deduplicate, and link only the selected papers through `ingest_batch`. Requires an existing parent node. |
+
+Both tools accept an absolute `workspace` path and either `records` (DOI strings
+or pipeline record objects), `ris_paths` (absolute paths to individual RIS files),
+or both. They never scan RIS directories or select unrelated queued papers.
+Pass the existing parent slug or UUID as `parent`; it is required for ingestion
+because Trellis reference nodes require a parent. No project or library is
+automatically created. For example, use these same arguments for preview and
+the explicitly requested ingestion:
+
+```json
+{
+  "workspace": "/absolute/path/to/any-trellis-directory",
+  "parent": "existing-parent-slug-or-uuid",
+  "records": ["10.1038/s41575-025-01077-5"]
+}
+```
+
+Ingestion writes bibliographic metadata and citation links, not PDF extraction or
+LLM findings. It does not archive inputs, use an inherited `RIS_SINK_PATH`, publish
+Git changes, or send Slack messages. Existing papers can be updated, and citation
+links can be materialized to existing targets. Cancellation may leave partial
+writes; inspect node status before retrying. Tool annotations describe read/write
+behavior but do not replace the client's permission policy.
+
+### Runtime setup
+
+Use the pipeline's existing Python environment and a `trellis` executable on
+`PATH`. Separately, the Python used to start the MCP server needs the optional
+SDK pinned in `requirements-mcp.txt`. They can be the same Python if both sets of
+dependencies are present. Nothing is installed by the adapter itself.
+
+```bash
+# Run with the Python that will host the MCP adapter.
+python -m pip install -r /absolute/path/to/checkout/requirements-mcp.txt
+
+# The child engine uses this Python; provider credentials come from its inherited
+# host environment, never tool arguments or a target directory's .env file.
+export LIBRARY_AGENT_PYTHON=/absolute/path/to/engine-python
+```
+
+The plugin manifest starts `python`, so launch OMP or Claude Code with that MCP
+Python on `PATH`. Keep the source checkout at a reviewed commit for a pinned
+engine. No edit to this repository's `config.yml` is needed for target selection.
+
+### OMP and Claude Code
+
+Both clients can load the repository's `.claude-plugin/plugin.json` in place:
+
+```bash
+omp --plugin-dir /absolute/path/to/checkout
+claude --plugin-dir /absolute/path/to/checkout
+```
+
+The manifest declares a 30-minute tool timeout. If the host has a shorter
+process-wide MCP timeout configured, adjust it explicitly for long ingestion
+runs. Loading the plugin does not grant permission to write every local graph.
+
+### Codex
+
+Configure the same server in `~/.codex/config.toml` or the trusted project's
+`.codex/config.toml`. Use the absolute MCP-Python and source paths:
+
+```toml
+[mcp_servers.library]
+command = "/absolute/path/to/mcp-python"
+args = ["/absolute/path/to/checkout/scripts/agent_mcp.py"]
+tool_timeout_sec = 1800
+
+[mcp_servers.library.env]
+LIBRARY_AGENT_PYTHON = "/absolute/path/to/engine-python"
+```
+
+Codex versions that name this timeout `tool_call_timeout_sec` instead of
+`tool_timeout_sec` must use their supported spelling. Check the resolved server
+configuration with `codex mcp get library --json`; an unrecognized setting may be
+ignored. Configure provider credentials through the host's environment settings.
+
+### Repeatability and receipts
+
+Every successful call returns the canonical target, explicit records, RIS paths
+and byte hashes, an input hash, the engine Git revision and Python-source hash,
+and Python dependency versions. Ingestion also reports each node's committed
+pipeline status, citation sources, and stored-citation hash. `links_processed`
+includes already-existing links; it is not a count of newly created edges.
+
+Identical preview and ingestion arguments have the same input hash. Separate
+worker processes prevent simultaneous requests from switching each other's
+target environment. Repeated ingestion deduplicates nodes and reference edges.
+Live provider responses and the graph can change; receipts identify a run but
+do not provide byte-identical offline replay or archive provider responses.
+
 ## Persistent-agent model
 
 `AGENT-CONTRACT.md` is the runtime contract for an autonomous agent that operates this

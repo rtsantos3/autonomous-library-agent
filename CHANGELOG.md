@@ -6,6 +6,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- 2026-11-06: Local stdio MCP tools for OMP, Claude Code, and Codex. Each request
+  names an existing Trellis workspace, explicit papers or RIS files, and an
+  existing parent for ingestion. Preview is read-only. Input/source hashes and
+  runtime receipts identify each invocation. The existing Hermes setup is unchanged.
+- 2026-11-06: Reference creation accepts an explicit parent UUID as well as a slug,
+  so local tools can select the parent without relying on an ambiguous name.
 - 2026-10-24: Title fallbacks after Crossref (`METADATA_FALLBACKS`): DataCite,
   then OpenAlex, each exposing `metadata(doi)` like citation providers expose
   `retrieve(doi)`. Fixes "Could not resolve a title" for DataCite-registered
