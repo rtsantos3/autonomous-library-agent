@@ -28,6 +28,25 @@ SERVER = FastMCP(
 )
 
 
+def _provider_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    # MCP credentials must be selected for this plugin, not inherited from
+    # unrelated tools. Direct Python/CLI ingestion retains its own configuration.
+    for key in (
+        "NCBI_API_KEY",
+        "S2_API_KEY",
+        "OPENALEX_API_KEY",
+        "OPENCITATIONS_ACCESS_TOKEN",
+        "CROSSREF_EMAIL",
+    ):
+        value = environment.get(f"LIBRARY_AGENT_{key}", "")
+        # Clients without Claude userConfig support leave optional templates
+        # unresolved. Never send those strings to a provider as credentials.
+        environment[key] = "" if value.startswith("${user_config.") else value
+    environment["CROSSREF_MAILTO"] = ""
+    return environment
+
+
 def _redact(text: str) -> str:
     for key, value in os.environ.items():
         if key.endswith(("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")) and len(value) >= 6:
@@ -67,6 +86,7 @@ async def invoke(
         "-m",
         "pipeline.local_agent",
         cwd=ROOT,
+        env=_provider_environment(),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

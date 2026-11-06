@@ -15,7 +15,7 @@ and an initialized Trellis workspace with an existing parent node.
 ```bash
 git clone --branch deploy --single-branch https://github.com/rtsantos3/autonomous-library-agent.git
 cd autonomous-library-agent
-export LIBRARY_AGENT_ROOT="$PWD"
+export LIBRARY_AGENT_ROOT=/absolute/path/to/autonomous-library-agent
 
 # Create only if this environment does not already exist.
 conda env create -f environment.yml
@@ -54,9 +54,9 @@ args = ["/absolute/path/to/autonomous-library-agent/scripts/agent_mcp.py"]
 tool_timeout_sec = 1800
 ```
 
-Use `python -c "import sys; print(sys.executable)"` to find the active interpreter.
+Use the Python executable inside the activated Conda environment.
 If the MCP server and ingestion engine use different environments, set
-`LIBRARY_AGENT_PYTHON` to the engine's Python executable in the server environment.
+`LIBRARY_AGENT_PYTHON` to the engine's Python executable in the server configuration.
 
 The included marketplace catalog also supports OMP and Claude Code. Loading this
 checkout with `--plugin-dir` uses `deploy`; the GitHub marketplace shorthand
@@ -88,11 +88,39 @@ bibliographic providers, creates or updates selected papers, and links cited
 papers already in the graph. An empty stored bibliography finishes as
 `pipeline:needs-review`, not `pipeline:digested`.
 
-Provider credentials come from the host environment; available settings are in
-[`templates/.env.example`](templates/.env.example). The MCP adapter does not load
-the target workspace's `.env` file. It disables an inherited RIS sink and does
-not scan unrelated queues, extract full text, publish Git changes, or send Slack
-messages. It runs with the local user's permissions, not in a sandbox.
+## Provider credentials and data
+
+In Claude Code, enter optional provider credentials through the plugin's
+configuration dialog. Each field is marked sensitive and defaults to empty.
+The MCP adapter does not reuse ambient provider keys or load workspace `.env`
+files. Leaving a field empty makes unauthenticated requests where supported.
+
+OMP does not currently resolve Claude's `userConfig` fields. Its plugin remains
+usable without keys. For authenticated use in OMP or Codex, configure the server
+directly and explicitly set the corresponding `LIBRARY_AGENT_` entries in that
+server's `env` map:
+
+| Server setting | Recipient |
+|---|---|
+| `LIBRARY_AGENT_NCBI_API_KEY` | `eutils.ncbi.nlm.nih.gov` |
+| `LIBRARY_AGENT_S2_API_KEY` | `api.semanticscholar.org` |
+| `LIBRARY_AGENT_OPENALEX_API_KEY` | `api.openalex.org` |
+| `LIBRARY_AGENT_OPENCITATIONS_ACCESS_TOKEN` | `api.opencitations.net` |
+| `LIBRARY_AGENT_CROSSREF_EMAIL` | `api.crossref.org` |
+
+Keep credential-bearing client configuration private and out of Git. Direct
+Python/CLI ingestion is separate and retains the conventional provider settings
+listed in [`templates/.env.example`](templates/.env.example).
+
+Provider requests send selected bibliographic identifiers or search terms, not
+the workspace's filesystem path or arbitrary local files. Provider keys go to
+their named services. OpenAlex documentation links and DOI URLs in metadata are
+not credential destinations.
+
+The adapter disables an inherited RIS sink and does not scan unrelated queues,
+extract full text, publish Git changes, or send Slack messages. It runs with the
+local user's permissions, not in a sandbox. Setup commands above are manual
+installation instructions; the MCP server does not download code or run package installers.
 
 Receipts identify inputs, engine source, runtime versions, and outcomes. They do
 not archive provider responses or guarantee offline replay. Preview matches can

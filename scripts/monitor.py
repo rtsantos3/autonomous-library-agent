@@ -22,7 +22,7 @@ Query params for /mutations:
 
 Run:
   python scripts/monitor.py --port 8901
-  curl -s localhost:8901/stats | python -m json.tool
+  curl -s localhost:8901/stats
   curl -s 'localhost:8901/mutations?since=120&entity_type=node&limit=20'
 """
 

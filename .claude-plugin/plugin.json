@@ -1,16 +1,63 @@
 {
   "name": "autonomous-library-agent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "PolyForm-Noncommercial-1.0.0",
   "description": "Targeted bibliographic ingestion into any explicitly selected local Trellis directory.",
+  "icon": "./.claude-plugin/icon.jpg",
+  "homepage": "https://github.com/rtsantos3/autonomous-library-agent",
+  "repository": "https://github.com/rtsantos3/autonomous-library-agent",
   "author": {
     "name": "Autonomous Library Agent contributors"
+  },
+  "userConfig": {
+    "ncbi_api_key": {
+      "type": "string",
+      "title": "NCBI API key",
+      "description": "Optional key sent only to NCBI E-utilities for PubMed requests.",
+      "sensitive": true,
+      "default": ""
+    },
+    "s2_api_key": {
+      "type": "string",
+      "title": "Semantic Scholar API key",
+      "description": "Optional key sent only to the Semantic Scholar API.",
+      "sensitive": true,
+      "default": ""
+    },
+    "openalex_api_key": {
+      "type": "string",
+      "title": "OpenAlex API key",
+      "description": "Optional key sent only to the OpenAlex API.",
+      "sensitive": true,
+      "default": ""
+    },
+    "opencitations_access_token": {
+      "type": "string",
+      "title": "OpenCitations access token",
+      "description": "Optional token sent only to the OpenCitations API.",
+      "sensitive": true,
+      "default": ""
+    },
+    "crossref_email": {
+      "type": "string",
+      "title": "Crossref contact email",
+      "description": "Optional email shared with Crossref for its polite request pool.",
+      "sensitive": true,
+      "default": ""
+    }
   },
   "mcpServers": {
     "library": {
       "type": "stdio",
       "command": "python",
       "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/agent_mcp.py"],
+      "env": {
+        "LIBRARY_AGENT_NCBI_API_KEY": "${user_config.ncbi_api_key}",
+        "LIBRARY_AGENT_S2_API_KEY": "${user_config.s2_api_key}",
+        "LIBRARY_AGENT_OPENALEX_API_KEY": "${user_config.openalex_api_key}",
+        "LIBRARY_AGENT_OPENCITATIONS_ACCESS_TOKEN": "${user_config.opencitations_access_token}",
+        "LIBRARY_AGENT_CROSSREF_EMAIL": "${user_config.crossref_email}"
+      },
       "timeout": 1800000
     }
   }

@@ -52,10 +52,10 @@ repos:
         pass_filenames: false
         stages: [pre-commit]
       - id: block-images
-        name: Block committing image files (png, jpg, jpeg, gif, svg, webp, bmp, tiff)
+        name: Block images except the directory listing icon
         entry: >-
           bash -c
-          'staged=$(git diff --cached --diff-filter=AM --name-only);
+          'staged=$(git diff --cached --diff-filter=AM --name-only | grep -vxF ".claude-plugin/icon.jpg");
           echo "$staged" | grep -qiE "\.(png|jpg|jpeg|gif|svg|webp|bmp|tiff?)$"
           && { echo "ERROR: image files not allowed in commits.";
           echo "$staged" | grep -iE "\.(png|jpg|jpeg|gif|svg|webp|bmp|tiff?)$";
