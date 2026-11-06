@@ -1,0 +1,17 @@
+{
+  "name": "autonomous-library-agent",
+  "version": "0.1.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "description": "Targeted bibliographic ingestion into any explicitly selected local Trellis directory.",
+  "author": {
+    "name": "Autonomous Library Agent contributors"
+  },
+  "mcpServers": {
+    "library": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/agent_mcp.py"],
+      "timeout": 1800000
+    }
+  }
+}

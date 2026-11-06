@@ -688,3 +688,30 @@ def test_link_nodes_new_edge_calls_link_and_adds_key_to_edge_index():
         trellis.ACTOR,
         "--json",
     )
+
+
+@pytest.mark.integration
+def test_reference_creation_accepts_an_explicit_parent_uuid(
+    ephemeral_trellis, monkeypatch
+):
+    parent = trellis.get_node(trellis.PROJECT_SLUG)
+    monkeypatch.setenv("TRELLIS_PROJECT_SLUG", parent["id"])
+    paper = trellis.add_reference(
+        "Precisely targeted reference",
+        metadata={"reference": {"doi": "10.1234/targeted"}},
+        actor_id="CODEX",
+    )
+    graph = trellis._run_json(
+        "subgraph",
+        "--uuid",
+        parent["id"],
+        "--mode",
+        "hierarchy",
+        "--depth",
+        "1",
+        "--json",
+    )
+    assert {node["id"] for node in graph["nodes"]} == {parent["id"], paper["id"]}
+    assert [(edge["source_id"], edge["target_id"]) for edge in graph["edges"]] == [
+        (parent["id"], paper["id"])
+    ]

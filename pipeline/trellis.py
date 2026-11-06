@@ -339,7 +339,9 @@ def add_reference(
         args += ["--tags", ",".join(tags)]
     if file_path:
         args += ["--file", file_path]
-    args += ["--parent", _project_slug(), "--actor-id", actor_id, "--json"]
+    parent = _project_slug()
+    args += ["--parent-uuid" if _is_uuid(parent) else "--parent", parent]
+    args += ["--actor-id", actor_id, "--json"]
     return _unwrap_node(_run_json(*args))
 
 
