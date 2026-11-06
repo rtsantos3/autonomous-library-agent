@@ -152,3 +152,61 @@ def retrieve(doi: str) -> CitationResult:
             # Keep this batch's IDs and continue hydrating the remaining batches.
             logger.warning("OpenAlex reference hydration batch failed")
     return parse(payload, hydration_payloads)
+
+
+def _abstract(inverted) -> str | None:
+    """Rebuild an abstract from OpenAlex's word -> positions inverted index."""
+    if not isinstance(inverted, dict):
+        return None
+    words = {}
+    for word, positions in inverted.items():
+        for position in positions if isinstance(positions, list) else []:
+            if isinstance(position, int):
+                words[position] = word
+    return " ".join(words[i] for i in sorted(words)) or None
+
+
+def parse_metadata(payload) -> dict | None:
+    """Normalize an OpenAlex work to resolve_identity fields."""
+    if not isinstance(payload, dict) or not text(payload.get("title")):
+        return None
+    authors = []
+    for authorship in payload.get("authorships") or []:
+        author = authorship.get("author") if isinstance(authorship, dict) else None
+        name = text(author.get("display_name")) if isinstance(author, dict) else ""
+        if name:
+            authors.append(name)
+    location = payload.get("primary_location")
+    source = location.get("source") if isinstance(location, dict) else None
+    published = year(payload.get("publication_year"))
+    return {
+        "title": text(payload.get("title")),
+        "doi": bare_doi(text(payload.get("doi"))),
+        "authors": authors,
+        "year": str(published) if published else None,
+        "venue": text(source.get("display_name")) if isinstance(source, dict) else None,
+        "abstract": _abstract(payload.get("abstract_inverted_index")),
+    }
+
+
+def metadata(doi: str) -> dict | None:
+    params = {}
+    api_key = os.getenv("OPENALEX_API_KEY")
+    if api_key:
+        params["api_key"] = api_key
+    try:
+        normalized_doi = bare_doi(text(doi))
+        if not normalized_doi:
+            raise ValueError("A DOI is required")
+        response = http_get(
+            "https://api.openalex.org/works/https://doi.org/"
+            f"{quote(normalized_doi, safe='/')}",
+            params=params or None,
+            limiter=OPENALEX_LIMITER,
+            timeout=30,
+        )
+        return parse_metadata(response.json())
+    except (requests.RequestException, ValueError):
+        # Exception strings can include request URLs containing the API key.
+        logger.warning("OpenAlex metadata lookup failed")
+        return None

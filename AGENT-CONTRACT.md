@@ -308,7 +308,11 @@ idempotent.
 Sources are tried in order and merged **only into missing fields** (existing
 values win): **PubMed** (esearch + efetch — supplies MeSH, keywords, publication
 types) → **Semantic Scholar** (`paperId`, fields of study, canonical DOI) →
-**Crossref** (fallback when no title resolved). A title-only record with
+**Crossref** (fallback when no title resolved) → **DataCite**, then **OpenAlex**
+(`METADATA_FALLBACKS`: each provider exposes `metadata(doi)`; tried in order only
+while a DOI is known and no title has resolved; a provider failure moves on to the
+next). DataCite registers the DOIs Crossref lacks (arXiv `10.48550/*`, Zenodo,
+theses). A title-only record with
 complete basic metadata (title + abstract + authors + year + venue) may skip API
 enrichment entirely. When a PMID is found by *search* (not supplied), the fetched
 title is checked against the known title with a fuzzy ratio ≥ 85 before the
@@ -376,7 +380,7 @@ in **Trellis Status Tags**.
 | `method` | Methods or tools referenced in literature. |
 | `dataset` | Datasets referenced in literature. |
 
-Every ingested paper must produce at minimum one `reference` node under `microbiome-research-library`. Downstream `finding`, `hypothesis`, `method`, and `dataset` nodes are extracted during digestion and linked to their parent `reference`.
+Every ingested paper must produce at minimum one `reference` node under the parent project: `microbiome-research-library` by default, or the existing node named by `TRELLIS_PROJECT_SLUG` (`--parent` on the RIS importer). Downstream `finding`, `hypothesis`, `method`, and `dataset` nodes are extracted during digestion and linked to their parent `reference`.
 
 ---
 
@@ -490,7 +494,7 @@ When resolving a paper by identifier or title, attempt sources in this order:
 1. PubMed
 2. Semantic Scholar
 3. Crossref
-4. arXiv
+4. DataCite (arXiv, Zenodo, and repository DOIs)
 5. OpenAlex
 
 Stop at the first source that returns a valid metadata record.

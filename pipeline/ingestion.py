@@ -46,6 +46,7 @@ from pipeline._utils import (
 )
 from pipeline.citation_types import CitationResult
 from pipeline.citations import ambiguous_citation_keys, fetch_outbound_citations
+from pipeline.providers import datacite, openalex
 from pipeline.trellis import _doi_key, _norm_title
 
 if TYPE_CHECKING:
@@ -299,7 +300,55 @@ def _make_tags(
     return list(dict.fromkeys(tags))
 
 
+_NAME_PARTICLES = {
+    "da",
+    "de",
+    "del",
+    "della",
+    "der",
+    "di",
+    "dos",
+    "du",
+    "la",
+    "le",
+    "st",
+    "st.",
+    "ten",
+    "ter",
+    "van",
+    "von",
+}
+_NAME_SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv"}
+
+
+def _structured_author(name) -> Optional[dict]:
+    """
+    One author as Trellis reference-v1 wants it: {"family", "given"}.
+    Trellis silently drops plain-string authors, so every name is converted.
+    Accepts "Family, Given" or "Given [particles] Family [suffix]".
+    """
+    if isinstance(name, dict):
+        return name if name.get("family") or name.get("given") else None
+    text = " ".join(str(name or "").split())
+    if not text:
+        return None
+    if "," in text:
+        family, given = (part.strip() for part in text.split(",", 1))
+        return {"family": family, "given": given} if family else None
+    tokens = text.split(" ")
+    if len(tokens) == 1:
+        return {"family": tokens[0], "given": ""}
+    end = len(tokens)
+    if tokens[-1].lower() in _NAME_SUFFIXES and len(tokens) > 2:
+        end -= 1
+    start = end - 1
+    while start > 1 and tokens[start - 1].lower() in _NAME_PARTICLES:
+        start -= 1
+    return {"family": " ".join(tokens[start:]), "given": " ".join(tokens[:start])}
+
+
 def _reference_metadata(resolved: ResolveResult) -> dict:
+    authors = [_structured_author(name) for name in resolved.authors or []]
     return {
         "schema": "reference-v1",
         "doi": resolved.doi,
@@ -307,7 +356,7 @@ def _reference_metadata(resolved: ResolveResult) -> dict:
         "s2_id": resolved.s2_id,
         "year": resolved.year,
         "venue": resolved.venue,
-        "authors": resolved.authors,
+        "authors": [author for author in authors if author],
         "alt_dois": resolved.alt_dois,
     }
 
@@ -685,6 +734,38 @@ def _fill_from_crossref(fields: dict) -> str:
     return "crossref" if fields["source"] == "input-only" else fields["source"]
 
 
+# Title fallbacks after Crossref, tried in order until a title resolves. Each
+# provider exposes metadata(doi) -> dict | None with resolve_identity field
+# names, like citation providers expose retrieve(doi). DataCite registers the
+# DOIs Crossref lacks (arXiv, Zenodo, theses); OpenAlex indexes both registries.
+METADATA_FALLBACKS = (
+    ("datacite", datacite.metadata),
+    ("openalex", openalex.metadata),
+)
+
+
+def _fill_from_fallbacks(fields: dict) -> str:
+    doi = fields.get("doi")
+    if not doi:
+        return fields["source"]
+    for name, lookup in METADATA_FALLBACKS:
+        if _blank_to_none(fields.get("title")):
+            break
+        try:
+            found = lookup(doi)
+        except Exception as exc:  # one provider failing must not stop the chain
+            logger.warning("%s metadata doi=%r failed: %s", name, doi, exc)
+            continue
+        if not found:
+            continue
+        found = dict(found)
+        found.pop("doi", None)  # keep the requested DOI as the identity
+        fields.update(_merge_missing(fields, found))
+        if _blank_to_none(fields.get("title")) and fields["source"] == "input-only":
+            fields["source"] = name
+    return fields["source"]
+
+
 def resolve_identity(
     parsed: ParseResult, prefetched: "Optional[BatchResolved]" = None
 ) -> ResolveResult:
@@ -795,6 +876,8 @@ def resolve_identity(
         fields["source"] = _fill_from_s2(fields)
         if not parsed.doi or not _blank_to_none(fields.get("title")):
             fields["source"] = _fill_from_crossref(fields)
+        if not _blank_to_none(fields.get("title")):
+            fields["source"] = _fill_from_fallbacks(fields)
 
     # Fallback floor: if enrichment resolved no keywords, keep the source-side
     # keywords (e.g. RIS KW) so a record enrichment cannot find is not left with
@@ -1458,7 +1541,7 @@ def backfill_nodes(
 
 
 def ingest_batch(
-    items: "list[str | dict]", workers: int = 8
+    items: "list[str | dict]", workers: int = 8, ris_sink=None
 ) -> tuple[list[IngestionOutcome], BatchMetrics]:
     # items: a list whose elements are either bare DOI strings (historical
     # contract) or full record dicts (e.g. RIS entries, possibly DOI-less).
@@ -1466,6 +1549,8 @@ def ingest_batch(
     # inside resolve_and_upsert. DOI strings still drive the S2 batch prefetch;
     # dict records contribute their DOI to the prefetch when they have one and
     # otherwise fall back to per-paper enrichment in resolve_identity.
+    # ris_sink: optional callable (e.g. RisSink().append) that receives every
+    # resolved paper; None defers to RIS_SINK_PATH (see pipeline.ris_sink).
     batch_t0 = time.perf_counter()
     phases: list[PhaseMetrics] = []
 
@@ -1597,6 +1682,21 @@ def ingest_batch(
         )
     elapsed = time.perf_counter() - t0
     add_phase("phase5 status", elapsed, len(upserted))
+
+    # RIS sink: a side output of resolution, independent of Trellis. Runs on the
+    # main thread after all phases; a sink failure is logged, never fatal.
+    from pipeline.ris_sink import sink_from_env
+
+    sink = ris_sink if ris_sink is not None else sink_from_env()
+    if sink is not None:
+        for outcome in outcomes:
+            if outcome.resolve and outcome.resolve.title:
+                try:
+                    sink(outcome.resolve)
+                except Exception as exc:
+                    logger.warning(
+                        "ris_sink failed for %r: %s", outcome.resolve.title, exc
+                    )
 
     metrics = BatchMetrics(
         phases=phases,

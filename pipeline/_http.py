@@ -28,6 +28,7 @@ CROSSREF_LIMITER = _RateLimiter(0.2)
 EUROPE_PMC_LIMITER = _RateLimiter(0.34)
 OPENALEX_LIMITER = _RateLimiter(0.2)
 OPENCITATIONS_LIMITER = _RateLimiter(0.34)
+DATACITE_LIMITER = _RateLimiter(0.2)
 
 
 def http_get(

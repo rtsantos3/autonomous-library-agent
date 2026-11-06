@@ -3,9 +3,42 @@
 All notable changes to the autonomous-library-agent are recorded here. Format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## Deployment branch
+
+- 2026-11-06: Promote the released `v0.1.0` runtime, plugin catalog, setup
+  documentation, and license. Preserve the deployment-only exclusion of
+  `tests/`; development coverage remains on `master`.
+
+## [0.1.0] - 2026-11-06
 
 ### Added
+- 2026-11-06: Add a self-hosted OMP/Claude Code marketplace catalog and release
+  installation instructions. Update the ingestion PRD with the local MCP
+  contract, verification evidence, and the boundary from the Eddy deployment.
+- 2026-11-06: Adopt PolyForm Noncommercial License 1.0.0 for this project and
+  declare its SPDX identifier in the plugin manifest. Dependency licenses remain
+  separate.
+- 2026-11-06: Local stdio MCP tools for OMP, Claude Code, and Codex. Each request
+  names an existing Trellis workspace, explicit papers or RIS files, and an
+  existing parent for ingestion. Preview is read-only. Input/source hashes and
+  runtime receipts identify each invocation. The existing Hermes setup is unchanged.
+- 2026-11-06: Reference creation accepts an explicit parent UUID as well as a slug,
+  so local tools can select the parent without relying on an ambiguous name.
+- 2026-10-24: Title fallbacks after Crossref (`METADATA_FALLBACKS`): DataCite,
+  then OpenAlex, each exposing `metadata(doi)` like citation providers expose
+  `retrieve(doi)`. Fixes "Could not resolve a title" for DataCite-registered
+  DOIs (arXiv `10.48550/*`, Zenodo, theses) that PubMed, S2, and Crossref lack.
+- 2026-10-24: RIS sink (`pipeline/ris_sink.py`). `RisSink(path).append(paper)`
+  writes one deduped RIS record (DOI, else normalized title). `ingest_batch`
+  takes `ris_sink=` and calls it for every resolved paper; with no argument the
+  hook runs only when `RIS_SINK_PATH` is set. Default path:
+  `~/git_repos/vault/references/library.ris`.
+- 2026-10-24: Configurable parent project. `TRELLIS_PROJECT_SLUG` overrides
+  `microbiome-research-library` so other workspaces can host new references.
+- 2026-10-24: RIS importer drop-folder options: `--parent`, `--archive`,
+  `--notes-dir` (stub notes bound as node files), `--ris-sink`, and an
+  exact-title Crossref DOI lookup for DOI-less records (`--no-crossref` skips
+  it). The sink's own output file is never read as input.
 - 2026-10-23: Add Europe PMC, OpenAlex, and OpenCitations indexed references to
   the citation union. Isolate all five retrieval APIs behind the same citation
   record contract. Preserve index-only IDs, partial results, and provenance.
